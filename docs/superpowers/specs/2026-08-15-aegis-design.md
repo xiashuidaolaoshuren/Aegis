@@ -1,7 +1,7 @@
 # Aegis — Payment Authorization Switch — Design
 
 **Date:** 2026-08-15
-**Status:** Approved for planning (Aegis naming and milestones revision, 2026-08-15)
+**Status:** Approved for planning (domain model locked 2026-08-15; see `CONTEXT.md`)
 
 **Aegis** is a simulated card-authorization switch: ISO 8583 over TCP, a durable
 double-entry ledger, and two desktop operations consoles.
@@ -60,6 +60,11 @@ Explicitly out of scope, to keep the project finishable:
 - No general-purpose database. Persistence is a purpose-built write-ahead log.
 - Not the whole ISO 8583 specification — only the message types and fields
   listed under "Message scope" below.
+- No refund or chargeback after capture. Reversal and expiry apply only to a
+  live Hold.
+- No partial capture. Field 4 on `0200` must equal the original authorization.
+- No ISO funding or deposit message. Opening Available comes from a genesis
+  fixture at process start.
 
 ## Decisions
 
@@ -121,7 +126,7 @@ WebEngine shell can be wrapped later.
 | `concurrent` | Thread pool, bounded queue, later a lock-free ring buffer | Primitives used throughout |
 | `ledger` | Account balances, double-entry postings, write-ahead log, recovery | Single writer per partition |
 | `authorizer` | Validation, risk rules, the approve or decline decision | Worker pool |
-| `issuersim` | Simulated issuing bank with tunable latency and decline rate | Worker pool |
+| `issuersim` | Fake network: tunable latency, timeouts, injected `05`. No balances. | Worker pool |
 | `metrics` | Per-thread counters and a latency histogram | Written by all, read via observer |
 | `observer` | Copyable `MetricsSnapshot`, lossy transaction ring, command API (start/stop, inject fault). Qt-free. | Called from GUI threads or a host-side bridge; never holds engine pointers |
 
@@ -164,6 +169,19 @@ event backlog can form. Neither UI talks to the ledger directly.
 
 ## Domain model
 
+Ubiquitous language lives in [`CONTEXT.md`](../../../CONTEXT.md). Architectural
+money decisions: [ADR 0001](../../adr/0001-closed-loop-ledger.md),
+[ADR 0002](../../adr/0002-capture-is-cross-wallet.md).
+
+Aegis is **closed-loop**: it is the only ledger. `issuersim` is a fake network
+(latency, timeouts, injected `05`), not a second balance book. Response `51`
+comes from Cardholder Available.
+
+Money is owned by **Wallets** (`AccountId`): Cardholder (keyed by PAN), Merchant
+(keyed by MerchantId), System (Interchange). **Buckets** on those wallets are
+the posting lines: Cardholder Available and Holds, Merchant Payable, System
+Interchange. `AccountId` never means a single bucket.
+
 ### Money
 
 Amounts are integer minor units inside a `Money` type carrying a `Currency`.
@@ -174,14 +192,15 @@ Currency arrives at runtime in field 49, so the currency check is a runtime one:
 arithmetic between mismatched currencies returns an error rather than silently
 coercing, and there is no implicit conversion to or from a raw integer. The
 compile-time guarantees live in the strong-type layer below — `Money` cannot be
-added to an `int`, and identifiers cannot be interchanged.
+added to an `int`, and identifiers cannot be interchanged. Screening rejects an
+authorization whose field 49 does not match the Cardholder wallet currency.
 
 ### Strong types
 
 Every identifier has its own type rather than being an `int` or a
-`std::string`: `AccountId`, `TerminalId`, `Stan`, `Rrn`, `Pan`. All are
-generated from one small `Tagged<T, Tag>` template. Passing a terminal ID where
-an account ID belongs must not compile.
+`std::string`: `AccountId` (wallet), `MerchantId`, `TerminalId`, `Stan`, `Rrn`,
+`Pan`. All are generated from one small `Tagged<T, Tag>` template. Passing a
+terminal ID where a wallet ID belongs must not compile.
 
 ### Card number handling
 
@@ -209,7 +228,7 @@ Fields implemented: 2 (PAN), 3 (processing code), 4 (amount), 7 (transmission
 date and time), 11 (STAN), 12 and 13 (local time and date), 37 (RRN), 38
 (authorization ID), 39 (response code), 41 (terminal ID), 42 (merchant ID), 49
 (currency code), 52 (PIN block, opaque), 90 (original data elements, required
-for reversals).
+for capture and reversal).
 
 Response codes used: `00` approved, `05` do not honour, `30` format error, `51`
 insufficient funds, `96` system malfunction (returned under backpressure).
@@ -217,39 +236,77 @@ insufficient funds, `96` system malfunction (returned under backpressure).
 ### Transaction lifecycle
 
 ```
-Received -> Validated -> Screened -> Authorized -> Captured -> Settled
-   |            |            |            |                    (M6)
-   v            v            v            v
-Replayed     Rejected     Declined     Reversed
-(duplicate)  (resp 30)    (05 / 51)    (timeout or expiry)
+Received -> Validated -> Screened -> Reserved -> Authorized -> Captured -> Settled
+   |            |            |            |            |                    (M6)
+   v            v            v            v            v
+Replayed     Rejected     Declined     Reversed     Reversed
+(duplicate)  (resp 30)    (05/51,     (issuer       (0400 while
+                           no hold)    timeout/05     hold is live)
+                                       or TTL expiry)
 ```
 
-Every terminal state writes to the ledger, because releasing a hold is as much
-a money event as placing one.
+**Received → Validated.** Format and required fields. Failure: `30`, no Hold.
+
+**Screened.** Hard local rules *before* reserve: currency matches wallet, amount
+> 0, optional max-amount. Failure: `05`, no Hold.
+
+**Funds check.** If Available would go negative: `51`, no Hold, `issuersim` is
+not called.
+
+**Reserved.** Hold posted (Available → Holds), then wait on `issuersim`.
+
+**Authorized.** Issuer simulator returns `00`. Hold stays until capture,
+reversal, or expiry.
+
+**Reversed.** Timeout, injected `05` after reserve, `0400`, or TTL/sweeper /
+inject-expire. Hold released (Holds → Available). Not valid after Capture.
+
+**Captured.** Full Hold amount; fee split to Merchant Payable and Interchange.
+Always cross-wallet (Stage 3: two-phase on this path).
+
+**Settled.** M6 stretch: discharge Payable. Capture does not pay the merchant
+out.
+
+Every state that moves money writes to the ledger. Screening/`51` do not.
 
 ### Postings
 
-Cardholder and merchant accounts are liabilities of the switch, so a debit
-decreases them and a credit increases them; income accounts follow the same
-convention. Every event produces a balanced set of postings. A 50.00 purchase at
-a 2.9 percent merchant fee:
+Cardholder and merchant wallets are liabilities of Aegis, so a debit decreases
+them and a credit increases them. Interchange follows the same convention.
+Every event produces a balanced set of postings. A 50.00 purchase at a 2.9
+percent merchant fee (fee remainder stays with the merchant so the Hold is fully
+consumed):
 
-**At authorization** — debit `cardholder available` 50.00, credit `cardholder
-holds` 50.00. No money has left the system; 50.00 simply became unavailable to
-spend, which is precisely what an authorization is.
+**At reserve (authorization hold)** — debit Cardholder Available 50.00, credit
+Cardholder Holds 50.00. Intra-wallet. No money has left the Cardholder; 50.00
+became unavailable to spend.
 
-**At capture** — debit `cardholder holds` 50.00, credit `merchant payable`
-48.55, credit `interchange income` 1.45. Debits and credits both total 50.00.
+**At capture** — debit Cardholder Holds 50.00, credit Merchant Payable 48.55,
+credit System Interchange 1.45. Cross-wallet. Field 4 must equal 50.00; the
+split is a fee, not a partial capture.
 
-**On reversal or hold expiry** — the authorization pair inverted: debit
-`cardholder holds`, credit `cardholder available`, same amount.
+**On reversal or hold expiry** — invert the reserve: debit Holds, credit
+Available, same amount. Intra-wallet. Forbidden after Capture.
+
+### Genesis
+
+Process start loads a fixture of wallets and opening Available (tests: a tiny
+set; load runs: a generated population). There is no ISO message that funds a
+wallet.
 
 ### Idempotency
 
-The idempotency key is terminal ID plus STAN plus transmission date. A
-retransmitted message returns the stored original response rather than
-authorizing again. Because ISO 8583 terminals retransmit on timeout as a matter
+The idempotency key is TerminalId + STAN + field 7 date (MMDD). A retransmitted
+`0100` returns the stored original response rather than reserving again.
+Capture and reversal locate the original authorization via field 90. `0200` and
+`0400` are themselves idempotent on their own key so a retried capture does not
+move money twice. Because ISO 8583 terminals retransmit on timeout as a matter
 of course, this is not an edge case — it is normal traffic.
+
+### Hold expiry
+
+Each Hold has a configurable TTL (short in tests and demos). A sweeper expires
+due Holds with the same posting as reversal. The console can inject expire-now.
 
 ## Invariants
 
@@ -257,15 +314,15 @@ Checked continuously under load by the test harness, not once at the end of a
 run:
 
 1. **Debits equal credits, always.** After every posting batch the sum across
-   all accounts is exactly zero. Debug builds assert this on each write.
-2. **Available balance never goes negative.** Available equals ledger balance
-   minus outstanding holds. An authorization that would break this is declined
-   with response code 51.
-3. **One authorization, one hold.** Every approved authorization has exactly
-   one live hold until it is captured, reversed, or expires.
-4. **A duplicate never moves money twice.** Verified by replaying traffic.
+   all buckets is exactly zero. Debug builds assert this on each write.
+2. **Available never goes negative.** An authorization that would break this is
+   declined with `51` before any Hold is posted and before `issuersim` is called.
+3. **One authorization, one live Hold.** A reserved or authorized `0100` has
+   exactly one live Hold until capture, reversal, or expiry.
+4. **A duplicate never moves money twice.** Same idempotency key returns the
+   stored response; retried `0200`/`0400` do not post twice.
 5. **Replay reproduces state exactly.** Killing the process mid-load and
-   restarting must rebuild identical balances from the write-ahead log.
+   restarting must rebuild identical bucket balances from the write-ahead log.
 
 ## Concurrency arc
 
@@ -284,13 +341,13 @@ two locks, and acquiring them in inconsistent order deadlocks. The fix is a
 total ordering on acquisition. Teaches lock granularity, hash partitioning,
 deadlock and lock ordering.
 
-**Stage 3 — account partitions, no locks.** Each partition owns a disjoint
-slice of accounts and runs on exactly one thread, so within a partition there
-is no sharing and nothing to lock. Workers route transactions to the owning
-partition by message. This generalises the single-writer principle rather than
-abandoning it. Teaches shared-nothing design, message passing, lock-free ring
-buffers, atomics and memory ordering, and why a cross-partition transfer needs
-a two-phase protocol.
+**Stage 3 — wallet partitions, no locks.** Each partition owns a disjoint
+slice of wallets and runs on exactly one thread, so within a partition there
+is no sharing and nothing to lock. Workers route by wallet. Authorization is
+single-partition (one Cardholder). Capture is always cross-partition (Cardholder
++ Merchant + System) and uses two-phase commit — that is the capture path, not
+a rare transfer. Teaches shared-nothing design, message passing, lock-free ring
+buffers, atomics and memory ordering, and 2PC.
 
 Three recorded benchmark runs plus a written analysis is a stronger artifact
 than a fast system with no story.
@@ -303,14 +360,14 @@ Each technique is introduced at the point the project creates a reason for it.
 | --- | --- |
 | RAII and ownership discipline | The socket and file wrappers |
 | Smart pointers, unique ownership | The codec and ledger |
-| Strong types via `Tagged<T, Tag>` | `Money`, `AccountId`, `Pan`, `Stan` |
+| Strong types via `Tagged<T, Tag>` | `Money`, `AccountId`, `MerchantId`, `Pan`, `Stan` |
 | `constexpr` specification tables | The ISO 8583 field definitions |
 | `std::span` and `string_view` | Zero-copy parsing over the read buffer |
 | `Result<T, E>` error values | The codec and the authorizer |
 | Move semantics | Handing message buffers between threads |
 | `std::jthread` and `stop_token` | Cooperative shutdown of the thread pool |
 | PImpl | Keeping ledger internals out of public headers |
-| Concepts | The pluggable risk-rule interface |
+| Concepts | Optional later; Screening in committed scope is hard rules, not a plugin |
 | Atomics and memory ordering | Metrics snapshots, then the ring buffer |
 | Cache-line padding | Removing false sharing between counters |
 | Object pools and allocators | Taking allocation off the hot path |
@@ -501,11 +558,12 @@ disk.
 **Done when:**
 
 - Postings always balance; debug build asserts after every write.
-- Authorization, capture, reversal, and hold expiry behave per the domain
-  section.
-- Kill-and-replay test: hard-kill mid-batch, restart, balances match shadow
-  model exactly.
-- Idempotency: duplicate STAN returns stored response without a second hold.
+- Reserve, capture (full amount, fee split), reversal, and TTL expiry behave
+  per the domain section. Genesis fixture loads opening Available.
+- Kill-and-replay test: hard-kill mid-batch, restart, bucket balances match
+  shadow model exactly.
+- Idempotency: duplicate TerminalId+STAN+field 7 date returns stored response
+  without a second Hold.
 
 **Learning:** RAII, file I/O, move semantics, PImpl, double-entry invariants.
 
@@ -548,7 +606,7 @@ analysis in `docs/` or `bench/`.
 - `MetricsSnapshot`, lossy transaction ring, and command API exist and are
   Qt-free.
 - ThreadSanitizer build passes in Linux CI on a concurrent smoke test.
-- Shadow model agrees with stage-3 ledger under load.
+- Shadow model agrees with stage-3 ledger under load, including captures (2PC).
 
 **Learning:** Atomics, memory ordering, lock-free ring buffer, profiling,
 contention measurement.
