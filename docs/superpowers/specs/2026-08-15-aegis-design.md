@@ -1,7 +1,10 @@
-# Payment Authorization Switch — Design
+# Aegis — Payment Authorization Switch — Design
 
 **Date:** 2026-08-15
-**Status:** Approved for planning (GUI dual-console revision, 2026-08-15)
+**Status:** Approved for planning (Aegis naming and milestones revision, 2026-08-15)
+
+**Aegis** is a simulated card-authorization switch: ISO 8583 over TCP, a durable
+double-entry ledger, and two desktop operations consoles.
 
 ## Context
 
@@ -20,13 +23,12 @@ concurrency primitives rather than programming fundamentals. Budget is roughly
 10–15 hours per week over two to three months. The intended outcome is a
 portfolio piece for applications to payments companies.
 
-The project is a **payment authorization switch**: the component that sits
-between point-of-sale terminals and a card issuer, deciding in milliseconds
-whether a card payment is approved. It is a good fit for the learning targets
-because it is genuinely concurrency-heavy (many transactions in flight at once)
-and genuinely correctness-critical (money must never be created or destroyed),
-and those two pressures are what force good C++ habits rather than merely
-permitting them.
+Aegis is the component that sits between point-of-sale terminals and a card
+issuer, deciding in milliseconds whether a card payment is approved. It is a
+good fit for the learning targets because it is genuinely concurrency-heavy
+(many transactions in flight at once) and genuinely correctness-critical (money
+must never be created or destroyed), and those two pressures are what force good
+C++ habits rather than merely permitting them.
 
 ## Goals
 
@@ -34,7 +36,8 @@ permitting them.
   them against a durable double-entry ledger, and responds under a measurable
   latency budget.
 - Two desktop operations consoles on the same engine: a complete Qt 6 Widgets
-  teaching UI, and a polished Vue 3 showcase hosted in Qt WebEngine.
+  teaching UI (`aegis-console`), and a polished Vue 3 showcase hosted in Qt
+  WebEngine (`aegis-web`).
 - Three successive ledger concurrency designs, each measured, with a written
   explanation of why each change helped.
 - A test suite that verifies money-correctness invariants under concurrent
@@ -51,7 +54,7 @@ Explicitly out of scope, to keep the project finishable:
 - No multi-currency conversion. Each account has one currency, and cross-
   currency transactions are rejected.
 - No public website, no mobile client, and no product REST API. Vue is an
-  embedded desktop UI, not a hosted service. A local WebSocket on `switchd` is
+  embedded desktop UI, not a hosted service. A local WebSocket on `aegisd` is
   allowed only as a WebEngine fallback and a Vite-dev aid.
 - No replication, consensus, or distributed operation. Single node only.
 - No general-purpose database. Persistence is a purpose-built write-ahead log.
@@ -62,6 +65,8 @@ Explicitly out of scope, to keep the project finishable:
 
 | Decision | Choice | Reasoning |
 | --- | --- | --- |
+| Product name | Aegis | Authorization as a shield over funds; short, professional, easy to say |
+| Naming | CMake project `Aegis`; library `aegis`; binaries `aegisd`, `aegis-console`, `aegis-web`, `aegis-load` | Consistent terminal and README identity |
 | Domain | Payments and ledgers | Career target is payments companies |
 | Realism | Self-contained, but a real protocol | Authenticity without API plumbing eating the budget |
 | C++ GUI | Qt 6 Widgets | Teaches real desktop C++: model/view, GUI thread, queued signals |
@@ -78,20 +83,21 @@ Explicitly out of scope, to keep the project finishable:
 
 ### Binaries
 
-`libswitch` is a static library containing the entire engine. It has no GUI
+The `aegis` static library contains the entire engine. It has no GUI
 dependency, no Qt dependency, and no global mutable state. Four executables
 link against it:
 
-- **`switchd`** — headless runner. Used for benchmarking and for CI, where no
+- **`aegisd`** — headless runner. Used for benchmarking and for CI, where no
   display is available. May optionally expose the observer API over a local
   WebSocket so the Vue UI can be developed in a normal browser.
-- **`console`** — Qt 6 Widgets operations application. Runs the engine
+- **`aegis-console`** — Qt 6 Widgets operations application. Runs the engine
   in-process on background threads. This is the complete teaching UI: every
   control, including start/stop and fault injection. Functional, not pretty.
-- **`console-web`** — thin Qt 6 window whose content is `QWebEngineView`.
-  Hosts the Vue 3 showcase. Runs the engine in-process the same way `console`
-  does. Links Qt WebEngine; `console` and `switchd` must not.
-- **`termsim`** — a standalone load generator simulating a fleet of POS
+- **`aegis-web`** — thin Qt 6 window whose content is `QWebEngineView`.
+  Hosts the Vue 3 showcase. Runs the engine in-process the same way
+  `aegis-console` does. Links Qt WebEngine; `aegis-console` and `aegisd` must
+  not.
+- **`aegis-load`** — a standalone load generator simulating a fleet of POS
   terminals, connecting over real TCP.
 
 Keeping the engine free of Qt is the most important boundary in the design. It
@@ -100,13 +106,13 @@ free of render overhead, and allows the full engine to run in Linux CI while
 development happens on Windows. It also enforces the correct relationship:
 both consoles are viewers, not the application.
 
-`console-web` is isolated as its own target so a WebEngine/vcpkg failure cannot
+`aegis-web` is isolated as its own target so a WebEngine/vcpkg failure cannot
 block engine work or the Widgets console. If WebEngine cannot be made to build
 in reasonable time, the same Vue app falls back to a browser against
-`switchd`'s local WebSocket. That fallback still teaches the frontend; the
+`aegisd`'s local WebSocket. That fallback still teaches the frontend; the
 WebEngine shell can be wrapped later.
 
-### Components in `libswitch`
+### Components in `aegis`
 
 | Component | Responsibility | Runs on |
 | --- | --- | --- |
@@ -122,7 +128,7 @@ WebEngine shell can be wrapped later.
 ### Thread topology
 
 ```
-termsim (separate process): N simulated POS terminals
+aegis-load (separate process): N simulated POS terminals
    |  TCP, ISO 8583 with 2-byte length prefix
    v
 acceptor thread (1)      accepts connections, assigns sockets
@@ -137,8 +143,8 @@ ledger writer (1 per partition)   apply postings, append to WAL
    v
 WAL and periodic snapshots on disk
    |
-observer snapshot  -->  Widgets GUI thread at 30 Hz
-                   -->  console-web via Qt WebChannel (same snapshot)
+observer snapshot  -->  aegis-console GUI thread at 30 Hz
+                   -->  aegis-web via Qt WebChannel (same snapshot)
 ```
 
 `M` and `W` are runtime-tunable so their effect on throughput and latency can
@@ -212,7 +218,7 @@ insufficient funds, `96` system malfunction (returned under backpressure).
 
 ```
 Received -> Validated -> Screened -> Authorized -> Captured -> Settled
-   |            |            |            |                    (phase 6)
+   |            |            |            |                    (M6)
    v            v            v            v
 Replayed     Rejected     Declined     Reversed
 (duplicate)  (resp 30)    (05 / 51)    (timeout or expiry)
@@ -316,7 +322,7 @@ components, or Qt modules beyond that API.
 
 ### Shared observer API
 
-`libswitch` exposes:
+The `aegis` library exposes:
 
 - `MetricsSnapshot` — a plain copyable struct with no pointers into engine
   memory: throughput, approval rate, latency percentiles, queue depth, ledger
@@ -335,7 +341,7 @@ render path and no way to observe a half-updated number.
 Fault injection is on the main screen of both UIs rather than hidden in a menu,
 because a demo where everything succeeds proves very little.
 
-### `console` — Qt Widgets (complete teaching UI)
+### `aegis-console` — Qt Widgets (complete teaching UI)
 
 One window in four bands:
 
@@ -353,12 +359,12 @@ transaction table is a `QAbstractTableModel`, not a `QTableWidget`, because
 model/view is the C++ desktop pattern worth learning. A `QTimer` on the GUI
 thread calls `snapshot()`.
 
-### `console-web` — Vue showcase in Qt WebEngine
+### `aegis-web` — Vue showcase in Qt WebEngine
 
 A thin C++ host: a `QMainWindow` containing a `QWebEngineView`, plus enough
 native chrome to be a real window (title, close). The host runs the engine
 in-process and bridges the observer API into JavaScript with **Qt WebChannel**
-(the adapter lives in `console-web`, not in `libswitch`).
+(the adapter lives in `aegis-web`, not in `aegis`).
 
 The page is a Vue 3 + Vite SPA using **shadcn-vue** (not React shadcn/ui). It is
 the polished demo: KPIs, live stream, charts, and fault buttons. It does not
@@ -368,18 +374,18 @@ controls can be copied later if time remains.
 **Dev vs ship:**
 
 - Development: the host loads `http://localhost:5173` so Vite hot-reload works.
-  Optionally the same SPA can be opened in Chrome against `switchd`'s local
+  Optionally the same SPA can be opened in Chrome against `aegisd`'s local
   WebSocket.
 - Production: Vite writes `dist/`; CMake copies it next to the binary (or into
   Qt resources); the host loads `index.html` from disk.
 
-`console-web` is the binary that ships Chromium. Expect a large download and a
+`aegis-web` is the binary that ships Chromium. Expect a large download and a
 large artifact. That cost is confined to this target.
 
 ### Sequence
 
 Engine and Widgets first. The Vue desktop app starts only after the observer
-API exists and the Widgets console can drive it. Chromium setup must not block
+API exists and `aegis-console` can drive it. Chromium setup must not block
 the codec, ledger, or concurrency arc.
 
 ## Error handling
@@ -418,7 +424,7 @@ Around it:
 - **Crash-recovery test** that drives load, kills the process hard, restarts,
   and asserts replayed balances match the shadow model.
 - **Race detection** via ThreadSanitizer in Linux CI.
-- **Benchmarks** with results committed per phase.
+- **Benchmarks** with results committed per milestone.
 
 Note a real platform constraint: MSVC supports AddressSanitizer but not
 ThreadSanitizer, and ThreadSanitizer is the tool that finds the data races this
@@ -428,76 +434,217 @@ Clang or GCC, and CI runs a ThreadSanitizer build on Linux for every push.
 ## Toolchain and repository layout
 
 - Visual Studio 2022 with MSVC for development; Clang in CI for sanitizers.
-- CMake driven by `CMakePresets.json`, so the same tree builds in Visual
-  Studio, VS Code, and CI without three sets of instructions.
+- CMake project name `Aegis`, driven by `CMakePresets.json`, so the same tree
+  builds in Visual Studio, VS Code, and CI without three sets of instructions.
 - vcpkg in manifest mode (`vcpkg.json`) for Qt 6 Widgets, GoogleTest, and —
-  only for the `console-web` target — Qt WebEngine. `console` and `switchd`
+  only for the `aegis-web` target — Qt WebEngine. `aegis-console` and `aegisd`
   must build without WebEngine installed.
 - Node.js + npm for the Vue app (`web/`): Vue 3, Vite, TypeScript, Tailwind,
-  shadcn-vue. The C++ build copies `web/dist` into the `console-web` runtime
+  shadcn-vue. The C++ build copies `web/dist` into the `aegis-web` runtime
   directory; it does not run npm as part of every engine rebuild.
 - C++20, `clang-format` enforced in CI.
 
 ```
-libswitch/     iso8583, net, concurrent, ledger, authorizer, issuersim, metrics, observer
-apps/          switchd, console, console-web, termsim
-web/           Vue 3 + Vite + shadcn-vue source (the console-web page)
+aegis/         iso8583, net, concurrent, ledger, authorizer, issuersim, metrics, observer
+apps/          aegisd, aegis-console, aegis-web, aegis-load
+web/           Vue 3 + Vite + shadcn-vue source (the aegis-web page)
 tests/
 bench/
 docs/
 ```
 
-## Build plan
+## Milestones
 
-Thirteen weeks at ten to fifteen hours, ordered so every phase ends with
-something that runs. Settlement is a stretch goal after the Vue showcase, not a
-commitment. Widgets polish is cut before Vue is cut: the Vue app is the demo
-you show; Widgets is how you learn C++ desktop.
+Five committed milestones at ten to fifteen hours per week, plus one stretch.
+Each milestone ends with something that runs and can be shown. You can stop
+after any committed milestone and still have a portfolio-worthy artifact.
 
-| Phase | Weeks | What ships | New ground |
+Widgets polish is cut before Vue is cut: `aegis-web` is the demo you show;
+`aegis-console` is how you learn C++ desktop.
+
+| ID | Name | Weeks | Ships |
 | --- | --- | --- | --- |
-| 0 · Toolchain | 1 | Empty C++ project building on Windows and in Linux CI, tests wired up. No WebEngine yet. | CMake, vcpkg, test harness |
-| 1 · Codec | 2–3 | ISO 8583 parse and serialise, round-trip tested and fuzzed | Templates, `constexpr`, `span`, `Result`, strong types |
-| 2 · Ledger | 4–5 | Single-threaded double-entry ledger, holds, WAL, crash recovery | RAII, file I/O, move semantics, PImpl |
-| 3 · Concurrent engine | 6–7 | Authorization end to end over TCP, plus a bare Qt Widgets window | Threads, mutex, condition variable, `jthread` |
-| 4 · Measure and optimise | 8 | `termsim`, benchmark mode, ledger stages 2 and 3 with results, observer API stable | Atomics, memory ordering, lock-free queue, profiling |
-| 5 · Widgets console | 9–10 | Complete teaching UI: table, charts, fault injection. Functional, not pretty. | Qt model/view, cross-thread signals |
-| 6 · Vue desktop | 11–13 | `console-web`: WebEngine host + Vue 3/Vite/shadcn-vue showcase | Qt WebEngine, WebChannel, SPA packaging |
-| 7 · Settlement (stretch) | after 13 | Batch reconciliation and merchant payout reports | Parallel algorithms, memory-mapped I/O |
+| M1 | Foundation | 1–3 | Building tree, CI, ISO 8583 codec tested and fuzzed |
+| M2 | Ledger | 4–5 | Single-threaded double-entry ledger, holds, WAL, crash recovery |
+| M3 | Live Switch | 6–7 | Authorization over TCP + bare Qt Widgets window |
+| M4 | Performance Arc | 8 | `aegis-load`, benchmarks, ledger stages 2 and 3, observer API stable |
+| M5 | Dual Consoles | 9–13 | Complete Widgets UI, then Vue showcase in `aegis-web` |
+| M6 | Settlement | after 13 | Batch reconciliation — stretch, not a commitment |
 
-A bare Qt Widgets window lands in phase 3 rather than phase 5 on purpose:
-running out of time then still leaves a working graphical application. Phase 6
-starts only after phase 5 can drive the observer API. If WebEngine setup burns
-the phase-6 budget, ship the Vue app in a browser against `switchd` and treat
-the WebEngine window as leftover work.
+### M1 — Foundation
+
+**Goal:** A buildable, testable project skeleton and a correct ISO 8583 codec.
+
+**Ships:** `aegis` library (codec only), GoogleTest harness, Windows + Linux CI.
+No WebEngine, no GUI, no ledger yet.
+
+**Done when:**
+
+- `aegis` and tests build on Windows (MSVC) and in Linux CI.
+- Codec round-trips every message type and field listed under Message scope.
+- Property test: serialise(parse(bytes)) reproduces original bytes for a corpus.
+- Fuzzer smoke run completes without crash on a seed corpus.
+- CMake presets and vcpkg manifest are documented in README stub.
+
+**Learning:** CMake, vcpkg, test harness, templates, `constexpr`, `span`,
+`Result`, strong types.
+
+**Depends on:** —
+
+### M2 — Ledger
+
+**Goal:** Money-correct single-threaded ledger with durable recovery.
+
+**Ships:** `ledger` module inside `aegis`, shadow-model test harness, WAL on
+disk.
+
+**Done when:**
+
+- Postings always balance; debug build asserts after every write.
+- Authorization, capture, reversal, and hold expiry behave per the domain
+  section.
+- Kill-and-replay test: hard-kill mid-batch, restart, balances match shadow
+  model exactly.
+- Idempotency: duplicate STAN returns stored response without a second hold.
+
+**Learning:** RAII, file I/O, move semantics, PImpl, double-entry invariants.
+
+**Depends on:** M1
+
+### M3 — Live Switch
+
+**Goal:** End-to-end authorization over real TCP with concurrent engine threads.
+
+**Ships:** `aegisd` (or in-process engine runner), `aegis-load` or minimal TCP
+client, bare `aegis-console` window with a live counter. Engine still has no
+Qt dependency in `aegis`.
+
+**Done when:**
+
+- Client sends `0100` over TCP (2-byte length prefix) and receives `0110`.
+- Acceptor, I/O threads, worker pool, and single ledger writer run concurrently.
+- Backpressure: full queue returns response code 96, not unbounded memory growth.
+- Widgets window shows at least one live metric updating at ~30 Hz.
+- Engine unit tests still pass with no display attached.
+
+**Learning:** `std::thread`, `mutex`, `condition_variable`, `jthread`,
+hand-rolled sockets, thread-safe queues.
+
+**Depends on:** M2
+
+### M4 — Performance Arc
+
+**Goal:** Measure, optimise, and expose the engine to UIs through a stable
+observer API.
+
+**Ships:** `aegis-load` at configurable rate, `aegisd` benchmark mode,
+ledger concurrency stages 2 and 3, `observer` module, written benchmark
+analysis in `docs/` or `bench/`.
+
+**Done when:**
+
+- Three recorded benchmark runs (stage 1, 2, 3) with p50/p99/p99.9 and
+  throughput; short written analysis of why each change helped.
+- `MetricsSnapshot`, lossy transaction ring, and command API exist and are
+  Qt-free.
+- ThreadSanitizer build passes in Linux CI on a concurrent smoke test.
+- Shadow model agrees with stage-3 ledger under load.
+
+**Learning:** Atomics, memory ordering, lock-free ring buffer, profiling,
+contention measurement.
+
+**Depends on:** M3
+
+### M5 — Dual Consoles
+
+**Goal:** Two desktop UIs on the same observer API — complete Widgets teaching
+app, then polished Vue showcase.
+
+**Ships:** `aegis-console` (full), `aegis-web` (showcase) or browser fallback.
+
+**M5a — Widgets (weeks 9–10)**
+
+**Done when:**
+
+- KPIs, live transaction table (`QAbstractTableModel`), two charts, start/stop,
+  and fault injection (slow issuer, force timeouts, drop connections) all work.
+- GUI pulls snapshots; no engine pointer crosses the boundary.
+
+**M5b — Vue desktop (weeks 11–13)**
+
+**Done when:**
+
+- Vue 3 + Vite + shadcn-vue shows KPIs, live stream, charts, and fault buttons.
+- Runs in `aegis-web` via WebChannel, **or** in Chrome against `aegisd` if
+  WebEngine is blocked on Windows.
+- Production build loads packaged `web/dist/` without a dev server.
+
+**Learning:** Qt model/view and cross-thread signals (M5a); Qt WebEngine,
+WebChannel, SPA packaging (M5b).
+
+**Depends on:** M4
+
+### M6 — Settlement (stretch)
+
+**Goal:** End-of-day batch reconciliation and merchant payout reports.
+
+**Ships:** Settlement module, optional ops views in existing consoles.
+
+**Done when:**
+
+- Batch ingest matches authorizations to captures; mismatches are classified.
+- Merchant payout totals include fees; reports balance to ledger.
+
+**Learning:** Parallel algorithms, memory-mapped I/O.
+
+**Depends on:** M5. Does not block M5 success criteria.
+
+### Week mapping
+
+| Weeks | Milestone | Former phase label |
+| --- | --- | --- |
+| 1 | M1 toolchain slice | was phase 0 |
+| 2–3 | M1 codec slice | was phase 1 |
+| 4–5 | M2 | was phase 2 |
+| 6–7 | M3 | was phase 3 |
+| 8 | M4 | was phase 4 |
+| 9–10 | M5a | was phase 5 |
+| 11–13 | M5b | was phase 6 |
+| after 13 | M6 | was phase 7 |
+
+A bare Qt Widgets window lands in M3 rather than M5 on purpose: running out of
+time after M3 still leaves a working graphical application. M5b starts only
+after M5a can drive the observer API. If WebEngine setup burns the M5b budget,
+ship the Vue app in a browser against `aegisd` and treat the WebEngine window
+as leftover work.
 
 ## Risks
 
 | Risk | Mitigation |
 | --- | --- |
-| Qt and vcpkg setup consumes week one and kills momentum | Phase 0 is timeboxed to one week and ships only a building skeleton; the engine does not depend on Qt, so a Qt problem never blocks engine work |
-| Qt WebEngine fails or eats weeks on Windows | Confined to `console-web`. Fallback: same Vue app in the browser against `switchd`. Widgets console is unaffected. |
-| Two GUIs duplicate work and blow the calendar | Widgets is functionally complete but not polished. Vue is a showcase subset, not 1:1 parity. Settlement is cut first. |
+| Qt and vcpkg setup consumes week one and kills momentum | M1 is timeboxed: first week ships only a building skeleton; the engine does not depend on Qt, so a Qt problem never blocks engine work |
+| Qt WebEngine fails or eats weeks on Windows | Confined to `aegis-web`. Fallback: same Vue app in the browser against `aegisd`. `aegis-console` is unaffected. |
+| Two GUIs duplicate work and blow the calendar | Widgets is functionally complete but not polished. Vue is a showcase subset, not 1:1 parity. M6 is cut first. |
 | npm/Vite and CMake fight each other | Vue lives in `web/` and is built separately; CMake only copies `dist/`. Engine rebuilds do not invoke npm. |
 | ISO 8583 is a large specification and invites endless scope | The message types and field list above are fixed in this spec; anything else is out of scope |
 | Memory-safety bugs from being new to C++ | AddressSanitizer in development builds, RAII discipline enforced by code structure, no raw owning pointers |
-| Data races that Windows tooling cannot detect | Portable code plus ThreadSanitizer builds in Linux CI from phase 0 |
-| The GUI slips to the end and never gets built | A minimal Qt Widgets window is a phase 3 deliverable |
-| The optimisation arc becomes an open-ended rabbit hole | Each stage ends when its benchmark is recorded and its analysis written, not when it feels fast |
+| Data races that Windows tooling cannot detect | Portable code plus ThreadSanitizer builds in Linux CI from M1 |
+| The GUI slips to the end and never gets built | A minimal Qt Widgets window is an M3 deliverable |
+| The optimisation arc becomes an open-ended rabbit hole | M4 ends when three benchmarks are recorded and analysis is written, not when it feels fast |
 
 ## Success criteria
 
-The project is a success when all of the following hold:
+Aegis is a success when all of the following hold:
 
 1. A recorded sustained throughput figure with p50, p99 and p99.9 latency,
-   reproducible via `switchd`'s benchmark mode.
-2. Three benchmarked ledger stages with a written analysis of each change.
-3. The crash-recovery test passing in CI.
-4. The parser fuzzer running clean over millions of mutated inputs.
-5. A Qt Widgets console showing live metrics, the transaction stream, and
-   working fault injection.
+   reproducible via `aegisd`'s benchmark mode (M4).
+2. Three benchmarked ledger stages with a written analysis of each change (M4).
+3. The crash-recovery test passing in CI (M2).
+4. The parser fuzzer running clean over millions of mutated inputs (M1).
+5. `aegis-console` showing live metrics, the transaction stream, and working
+   fault injection (M5a).
 6. A Vue 3 showcase (KPIs, stream, charts, fault buttons) running either in
-   `console-web` via Qt WebEngine or, if WebEngine is blocked, in a browser
-   against `switchd`.
-7. A README that explains the architecture well enough for a payments engineer
-   to understand the design in five minutes.
+   `aegis-web` via Qt WebEngine or, if WebEngine is blocked, in a browser
+   against `aegisd` (M5b).
+7. A README that explains Aegis well enough for a payments engineer to
+   understand the design in five minutes.
