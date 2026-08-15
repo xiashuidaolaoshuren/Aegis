@@ -1,18 +1,18 @@
 # Payment Authorization Switch — Design
 
 **Date:** 2026-08-15
-**Status:** Approved for planning
+**Status:** Approved for planning (GUI dual-console revision, 2026-08-15)
 
 ## Context
 
 This is a learning project. The goal is to become competent in modern C++ by
-building something substantial, with three specific learning targets and one
-domain preference:
+building something substantial, with these learning targets:
 
 1. Multi-threaded programming
-2. Desktop application development
+2. Desktop application development in C++ (Qt Widgets)
 3. Advanced C++ technique generally
-4. A fintech / payments domain, if it can be arranged naturally
+4. Modern frontend as a desktop UI (Vue hosted in Qt WebEngine)
+5. A fintech / payments domain, if it can be arranged naturally
 
 The author is new to C++ but is an experienced programmer in another language,
 so the learning curve runs through memory ownership, the build system, and
@@ -33,8 +33,8 @@ permitting them.
 - A running system that accepts real ISO 8583 messages over TCP, authorizes
   them against a durable double-entry ledger, and responds under a measurable
   latency budget.
-- A Qt 6 desktop operations console showing live throughput, latency
-  percentiles, the transaction stream, and ledger health.
+- Two desktop operations consoles on the same engine: a complete Qt 6 Widgets
+  teaching UI, and a polished Vue 3 showcase hosted in Qt WebEngine.
 - Three successive ledger concurrency designs, each measured, with a written
   explanation of why each change helped.
 - A test suite that verifies money-correctness invariants under concurrent
@@ -50,7 +50,9 @@ Explicitly out of scope, to keep the project finishable:
   as opaque bytes; DUKPT key derivation and HSM integration are not implemented.
 - No multi-currency conversion. Each account has one currency, and cross-
   currency transactions are rejected.
-- No web interface, no mobile client, no REST API.
+- No public website, no mobile client, and no product REST API. Vue is an
+  embedded desktop UI, not a hosted service. A local WebSocket on `switchd` is
+  allowed only as a WebEngine fallback and a Vite-dev aid.
 - No replication, consensus, or distributed operation. Single node only.
 - No general-purpose database. Persistence is a purpose-built write-ahead log.
 - Not the whole ISO 8583 specification — only the message types and fields
@@ -62,9 +64,12 @@ Explicitly out of scope, to keep the project finishable:
 | --- | --- | --- |
 | Domain | Payments and ledgers | Career target is payments companies |
 | Realism | Self-contained, but a real protocol | Authenticity without API plumbing eating the budget |
-| GUI framework | Qt 6 Widgets | Best résumé value; its cross-thread signal mechanism teaches thread-safe UI directly |
+| C++ GUI | Qt 6 Widgets | Teaches real desktop C++: model/view, GUI thread, queued signals |
+| Frontend desktop UI | Qt WebEngine hosting Vue 3 + Vite + shadcn-vue | Teaches modern SPA-as-desktop without leaving the Qt/C++ project |
+| Vue UI library | shadcn-vue, not original shadcn/ui | shadcn/ui is React-first; shadcn-vue is the Vue equivalent |
+| GUI split | Widgets = complete teaching UI; Vue = polished demo | Two polished consoles will not fit the calendar; visual polish goes to Vue |
 | Networking | Hand-rolled sockets, own thread pool | A framework would hide exactly the concurrency being learned |
-| Process layout | Three binaries, one library | Load generation must not share cores with the thing it measures |
+| Process layout | Four binaries, one library | Load generation must not share cores with the thing it measures; WebEngine must not infect the engine or the Widgets app |
 | Lifecycle scope | Authorization, capture, reversal, expiry | Reversals and expiry are where the interesting correctness problems live |
 | Ledger concurrency | Build all three stages, measuring each | The progression is the learning; the destination alone teaches little |
 | Language standard | C++20 | `jthread`, `stop_token`, concepts, `span` are all directly useful here |
@@ -74,20 +79,32 @@ Explicitly out of scope, to keep the project finishable:
 ### Binaries
 
 `libswitch` is a static library containing the entire engine. It has no GUI
-dependency and no global mutable state. Three executables link against it:
+dependency, no Qt dependency, and no global mutable state. Four executables
+link against it:
 
 - **`switchd`** — headless runner. Used for benchmarking and for CI, where no
-  display is available.
-- **`console`** — the Qt 6 operations application. Runs the engine in-process
-  on background threads and observes it.
+  display is available. May optionally expose the observer API over a local
+  WebSocket so the Vue UI can be developed in a normal browser.
+- **`console`** — Qt 6 Widgets operations application. Runs the engine
+  in-process on background threads. This is the complete teaching UI: every
+  control, including start/stop and fault injection. Functional, not pretty.
+- **`console-web`** — thin Qt 6 window whose content is `QWebEngineView`.
+  Hosts the Vue 3 showcase. Runs the engine in-process the same way `console`
+  does. Links Qt WebEngine; `console` and `switchd` must not.
 - **`termsim`** — a standalone load generator simulating a fleet of POS
   terminals, connecting over real TCP.
 
 Keeping the engine free of Qt is the most important boundary in the design. It
 makes payment logic unit-testable without a window, keeps benchmark numbers
 free of render overhead, and allows the full engine to run in Linux CI while
-development happens on Windows. It also enforces the correct relationship: the
-console is a viewer, not the application.
+development happens on Windows. It also enforces the correct relationship:
+both consoles are viewers, not the application.
+
+`console-web` is isolated as its own target so a WebEngine/vcpkg failure cannot
+block engine work or the Widgets console. If WebEngine cannot be made to build
+in reasonable time, the same Vue app falls back to a browser against
+`switchd`'s local WebSocket. That fallback still teaches the frontend; the
+WebEngine shell can be wrapped later.
 
 ### Components in `libswitch`
 
@@ -99,7 +116,8 @@ console is a viewer, not the application.
 | `ledger` | Account balances, double-entry postings, write-ahead log, recovery | Single writer per partition |
 | `authorizer` | Validation, risk rules, the approve or decline decision | Worker pool |
 | `issuersim` | Simulated issuing bank with tunable latency and decline rate | Worker pool |
-| `metrics` | Per-thread counters and a latency histogram | Written by all, read by GUI |
+| `metrics` | Per-thread counters and a latency histogram | Written by all, read via observer |
+| `observer` | Copyable `MetricsSnapshot`, lossy transaction ring, command API (start/stop, inject fault). Qt-free. | Called from GUI threads or a host-side bridge; never holds engine pointers |
 
 ### Thread topology
 
@@ -119,7 +137,8 @@ ledger writer (1 per partition)   apply postings, append to WAL
    v
 WAL and periodic snapshots on disk
    |
-metrics snapshot  -->  Qt GUI thread, pulled at 30 Hz
+observer snapshot  -->  Widgets GUI thread at 30 Hz
+                   -->  console-web via Qt WebChannel (same snapshot)
 ```
 
 `M` and `W` are runtime-tunable so their effect on throughput and latency can
@@ -132,10 +151,10 @@ be wrong, so the design makes concurrent corruption structurally impossible
 rather than depending on locking being correct. Real ledger systems converge on
 the same trade.
 
-**The GUI pulls; it is never pushed to.** At full load the engine produces far
-more events per second than a screen can render. The GUI samples a snapshot on
-a timer, so the engine never blocks on the UI and no unbounded event backlog
-can form.
+**Both GUIs pull; they are never pushed to.** At full load the engine produces
+far more events per second than a screen can render. Each UI samples a
+snapshot on a timer, so the engine never blocks on either UI and no unbounded
+event backlog can form. Neither UI talks to the ledger directly.
 
 ## Domain model
 
@@ -290,7 +309,33 @@ Each technique is introduced at the point the project creates a reason for it.
 | Cache-line padding | Removing false sharing between counters |
 | Object pools and allocators | Taking allocation off the hot path |
 
-## Operations console
+## Operations consoles
+
+Two desktop UIs share one observer API. They do not share widgets, Vue
+components, or Qt modules beyond that API.
+
+### Shared observer API
+
+`libswitch` exposes:
+
+- `MetricsSnapshot` — a plain copyable struct with no pointers into engine
+  memory: throughput, approval rate, latency percentiles, queue depth, ledger
+  health (invariant flag, live holds, WAL size, account count), worker and
+  partition counts, uptime, running state.
+- A bounded, lossy transaction ring the UI drains. Old entries are overwritten
+  if the UI falls behind. The on-screen stream need not be complete; the
+  write-ahead log is the lossless record and must never drop anything.
+- A command API: start, stop, set worker/partition counts where safe, inject
+  faults (slow issuer, force timeouts, drop connections).
+
+Neither console imports ledger types. Both pull snapshots on a timer (~30 Hz).
+Nothing mutable is shared across the GUI boundary, so there is no lock in the
+render path and no way to observe a half-updated number.
+
+Fault injection is on the main screen of both UIs rather than hidden in a menu,
+because a demo where everything succeeds proves very little.
+
+### `console` — Qt Widgets (complete teaching UI)
 
 One window in four bands:
 
@@ -301,32 +346,41 @@ One window in four bands:
 3. **Main area** — the live transaction stream table beside two charts:
    throughput over the last 60 seconds, and latency percentiles over the same
    window. Both charts label their axes with units.
-4. **Bottom strip** — ledger health (invariant status, live hold count, WAL
-   size, account count) and fault injection controls.
+4. **Bottom strip** — ledger health and fault injection controls.
 
-Fault injection is on the main screen rather than hidden in a menu, because a
-demo where everything succeeds proves very little. Being able to slow the
-issuer to 500 ms and watch timeouts become reversals, or fill the queue and
-watch the switch shed load with response code 96, is what shows the system was
-designed rather than assembled.
+This app is functionally complete. Visual polish is not a goal here. The
+transaction table is a `QAbstractTableModel`, not a `QTableWidget`, because
+model/view is the C++ desktop pattern worth learning. A `QTimer` on the GUI
+thread calls `snapshot()`.
 
-### Thread safety at the GUI boundary
+### `console-web` — Vue showcase in Qt WebEngine
 
-The engine exposes a `MetricsSnapshot`: a plain copyable struct with no
-pointers into engine memory. A `QTimer` on the GUI thread fires at 30 Hz, calls
-`snapshot()`, and receives a value. Nothing mutable is shared across the
-boundary, so there is no lock in the render path and no way to observe a
-half-updated number.
+A thin C++ host: a `QMainWindow` containing a `QWebEngineView`, plus enough
+native chrome to be a real window (title, close). The host runs the engine
+in-process and bridges the observer API into JavaScript with **Qt WebChannel**
+(the adapter lives in `console-web`, not in `libswitch`).
 
-The transaction stream is different: the engine writes into a bounded ring
-buffer and the GUI drains it, overwriting old entries if the GUI falls behind.
-This asymmetry is deliberate. The on-screen stream is lossy by design, because
-a widget showing the last few hundred transactions need not be complete. The
-write-ahead log is the lossless record and must never drop anything.
+The page is a Vue 3 + Vite SPA using **shadcn-vue** (not React shadcn/ui). It is
+the polished demo: KPIs, live stream, charts, and fault buttons. It does not
+need 1:1 parity with every Widgets control on day one. Extra Widgets-only
+controls can be copied later if time remains.
 
-The transaction table is a `QAbstractTableModel`, not a `QTableWidget`, because
-model/view is the pattern worth learning and it handles a fast-scrolling table
-without copying every cell into a widget.
+**Dev vs ship:**
+
+- Development: the host loads `http://localhost:5173` so Vite hot-reload works.
+  Optionally the same SPA can be opened in Chrome against `switchd`'s local
+  WebSocket.
+- Production: Vite writes `dist/`; CMake copies it next to the binary (or into
+  Qt resources); the host loads `index.html` from disk.
+
+`console-web` is the binary that ships Chromium. Expect a large download and a
+large artifact. That cost is confined to this target.
+
+### Sequence
+
+Engine and Widgets first. The Vue desktop app starts only after the observer
+API exists and the Widgets console can drive it. Chromium setup must not block
+the codec, ledger, or concurrency arc.
 
 ## Error handling
 
@@ -376,13 +430,18 @@ Clang or GCC, and CI runs a ThreadSanitizer build on Linux for every push.
 - Visual Studio 2022 with MSVC for development; Clang in CI for sanitizers.
 - CMake driven by `CMakePresets.json`, so the same tree builds in Visual
   Studio, VS Code, and CI without three sets of instructions.
-- vcpkg in manifest mode (`vcpkg.json`) for Qt 6 and GoogleTest, so
-  dependencies are declared in the repository rather than installed globally.
+- vcpkg in manifest mode (`vcpkg.json`) for Qt 6 Widgets, GoogleTest, and —
+  only for the `console-web` target — Qt WebEngine. `console` and `switchd`
+  must build without WebEngine installed.
+- Node.js + npm for the Vue app (`web/`): Vue 3, Vite, TypeScript, Tailwind,
+  shadcn-vue. The C++ build copies `web/dist` into the `console-web` runtime
+  directory; it does not run npm as part of every engine rebuild.
 - C++20, `clang-format` enforced in CI.
 
 ```
-libswitch/     iso8583, net, concurrent, ledger, authorizer, issuersim, metrics
-apps/          switchd, console, termsim
+libswitch/     iso8583, net, concurrent, ledger, authorizer, issuersim, metrics, observer
+apps/          switchd, console, console-web, termsim
+web/           Vue 3 + Vite + shadcn-vue source (the console-web page)
 tests/
 bench/
 docs/
@@ -391,31 +450,39 @@ docs/
 ## Build plan
 
 Thirteen weeks at ten to fifteen hours, ordered so every phase ends with
-something that runs. Phase 6 is a stretch goal, not a commitment.
+something that runs. Settlement is a stretch goal after the Vue showcase, not a
+commitment. Widgets polish is cut before Vue is cut: the Vue app is the demo
+you show; Widgets is how you learn C++ desktop.
 
-| Phase | Weeks | What ships | New C++ ground |
+| Phase | Weeks | What ships | New ground |
 | --- | --- | --- | --- |
-| 0 · Toolchain | 1 | Empty project building on Windows and in Linux CI, tests wired up | CMake, vcpkg, test harness |
+| 0 · Toolchain | 1 | Empty C++ project building on Windows and in Linux CI, tests wired up. No WebEngine yet. | CMake, vcpkg, test harness |
 | 1 · Codec | 2–3 | ISO 8583 parse and serialise, round-trip tested and fuzzed | Templates, `constexpr`, `span`, `Result`, strong types |
 | 2 · Ledger | 4–5 | Single-threaded double-entry ledger, holds, WAL, crash recovery | RAII, file I/O, move semantics, PImpl |
-| 3 · Concurrent engine | 6–7 | Authorization end to end over TCP, plus a bare Qt window | Threads, mutex, condition variable, `jthread` |
-| 4 · Measure and optimise | 8 | `termsim`, benchmark mode, ledger stages 2 and 3 with results | Atomics, memory ordering, lock-free queue, profiling |
-| 5 · Console | 9–11 | The full operations console with charts and fault injection | Qt model/view, cross-thread signals |
-| 6 · Settlement (stretch) | 12–13 | Batch reconciliation and merchant payout reports | Parallel algorithms, memory-mapped I/O |
+| 3 · Concurrent engine | 6–7 | Authorization end to end over TCP, plus a bare Qt Widgets window | Threads, mutex, condition variable, `jthread` |
+| 4 · Measure and optimise | 8 | `termsim`, benchmark mode, ledger stages 2 and 3 with results, observer API stable | Atomics, memory ordering, lock-free queue, profiling |
+| 5 · Widgets console | 9–10 | Complete teaching UI: table, charts, fault injection. Functional, not pretty. | Qt model/view, cross-thread signals |
+| 6 · Vue desktop | 11–13 | `console-web`: WebEngine host + Vue 3/Vite/shadcn-vue showcase | Qt WebEngine, WebChannel, SPA packaging |
+| 7 · Settlement (stretch) | after 13 | Batch reconciliation and merchant payout reports | Parallel algorithms, memory-mapped I/O |
 
-A bare Qt window lands in phase 3 rather than phase 5 on purpose: running out
-of time then still leaves a working graphical application rather than a
-headless engine and a plan.
+A bare Qt Widgets window lands in phase 3 rather than phase 5 on purpose:
+running out of time then still leaves a working graphical application. Phase 6
+starts only after phase 5 can drive the observer API. If WebEngine setup burns
+the phase-6 budget, ship the Vue app in a browser against `switchd` and treat
+the WebEngine window as leftover work.
 
 ## Risks
 
 | Risk | Mitigation |
 | --- | --- |
 | Qt and vcpkg setup consumes week one and kills momentum | Phase 0 is timeboxed to one week and ships only a building skeleton; the engine does not depend on Qt, so a Qt problem never blocks engine work |
+| Qt WebEngine fails or eats weeks on Windows | Confined to `console-web`. Fallback: same Vue app in the browser against `switchd`. Widgets console is unaffected. |
+| Two GUIs duplicate work and blow the calendar | Widgets is functionally complete but not polished. Vue is a showcase subset, not 1:1 parity. Settlement is cut first. |
+| npm/Vite and CMake fight each other | Vue lives in `web/` and is built separately; CMake only copies `dist/`. Engine rebuilds do not invoke npm. |
 | ISO 8583 is a large specification and invites endless scope | The message types and field list above are fixed in this spec; anything else is out of scope |
 | Memory-safety bugs from being new to C++ | AddressSanitizer in development builds, RAII discipline enforced by code structure, no raw owning pointers |
 | Data races that Windows tooling cannot detect | Portable code plus ThreadSanitizer builds in Linux CI from phase 0 |
-| The GUI slips to the end and never gets built | A minimal Qt window is a phase 3 deliverable |
+| The GUI slips to the end and never gets built | A minimal Qt Widgets window is a phase 3 deliverable |
 | The optimisation arc becomes an open-ended rabbit hole | Each stage ends when its benchmark is recorded and its analysis written, not when it feels fast |
 
 ## Success criteria
@@ -427,7 +494,10 @@ The project is a success when all of the following hold:
 2. Three benchmarked ledger stages with a written analysis of each change.
 3. The crash-recovery test passing in CI.
 4. The parser fuzzer running clean over millions of mutated inputs.
-5. A Qt console showing live metrics, the transaction stream, and working fault
-   injection.
-6. A README that explains the architecture well enough for a payments engineer
+5. A Qt Widgets console showing live metrics, the transaction stream, and
+   working fault injection.
+6. A Vue 3 showcase (KPIs, stream, charts, fault buttons) running either in
+   `console-web` via Qt WebEngine or, if WebEngine is blocked, in a browser
+   against `switchd`.
+7. A README that explains the architecture well enough for a payments engineer
    to understand the design in five minutes.
