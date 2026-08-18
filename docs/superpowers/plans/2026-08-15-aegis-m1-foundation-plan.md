@@ -64,7 +64,7 @@ Ship a CMake/vcpkg project named `Aegis` that builds the `aegis` static library 
 
 ### T1 — Toolchain skeleton
 
-- [ ] **Do:** CMake project `Aegis`, presets, vcpkg (gtest), `.gitignore`, `.clang-format`, empty `aegis` lib that compiles, `aegis_tests` that runs one dummy test, README stub.
+- [X] **Do:** CMake project `Aegis`, presets, vcpkg (gtest), `.gitignore`, `.clang-format`, empty `aegis` lib that compiles, `aegis_tests` that runs one dummy test, README stub.
 - **Blocked by:** —
 - **Plan mode:** high
 - **TDD suitable:** no
@@ -122,3 +122,4 @@ Per subtask, obey **`TDD suitable`**: **`yes`** means strict **test-driven-devel
 | Date | Change |
 |------|--------|
 | 2026-08-15 | Initial plan |
+| 2026-08-18 | Local Windows toolchain is VS Build Tools 2026; `windows-msvc` uses generator `Visual Studio 18 2026`. |

@@ -490,7 +490,9 @@ Clang or GCC, and CI runs a ThreadSanitizer build on Linux for every push.
 
 ## Toolchain and repository layout
 
-- Visual Studio 2022 with MSVC for development; Clang in CI for sanitizers.
+- Visual Studio with MSVC (2022 or later) for development; Clang in CI for
+  sanitizers. The Windows CMake preset pins the generator installed on this
+  machine (`Visual Studio 18 2026` as of M1).
 - CMake project name `Aegis`, driven by `CMakePresets.json`, so the same tree
   builds in Visual Studio, VS Code, and CI without three sets of instructions.
 - vcpkg in manifest mode (`vcpkg.json`) for Qt 6 Widgets, GoogleTest, and —
