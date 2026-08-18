@@ -42,6 +42,16 @@
                 "lhs": "${hostSystemName}",
                 "rhs": "Linux"
             }
+        },
+        {
+            "name": "linux-clang-asan",
+            "displayName": "Linux Clang + ASan (vcpkg)",
+            "inherits": "linux-clang",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_CXX_FLAGS": "-fsanitize=address -fno-omit-frame-pointer -g",
+                "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address"
+            }
         }
     ],
     "buildPresets": [
@@ -53,6 +63,10 @@
         {
             "name": "linux-clang",
             "configurePreset": "linux-clang"
+        },
+        {
+            "name": "linux-clang-asan",
+            "configurePreset": "linux-clang-asan"
         }
     ],
     "testPresets": [
@@ -67,6 +81,13 @@
         {
             "name": "linux-clang",
             "configurePreset": "linux-clang",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "linux-clang-asan",
+            "configurePreset": "linux-clang-asan",
             "output": {
                 "outputOnFailure": true
             }

@@ -22,14 +22,34 @@ cmake --build --preset windows-msvc --config Debug
 ctest --preset windows-msvc -C Debug
 ```
 
-## Linux (CI)
+## Linux — configure, build, test
 
-The `linux-clang` preset is ready for CI. The GitHub Actions workflow lands in
-a later subtask (T2).
+```bash
+cmake --preset linux-clang
+cmake --build --preset linux-clang
+ctest --preset linux-clang --output-on-failure
+```
+
+## Linux CI and sanitizers
+
+CI runs on push and pull requests via [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
+
+- **linux-clang** — Clang build and `ctest` on `ubuntu-latest`
+- **linux-clang-asan** — same with AddressSanitizer (`linux-clang-asan` preset)
+
+To run the ASan preset locally on Linux:
+
+```bash
+cmake --preset linux-clang-asan
+cmake --build --preset linux-clang-asan
+ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 ctest --preset linux-clang-asan --output-on-failure
+```
+
+ThreadSanitizer (TSan) is planned for M4 when concurrent engine code exists; M1
+only ships the ASan preset.
 
 ## What's next
 
-- **T2:** Linux CI + AddressSanitizer preset
 - **T3+:** Domain types (`Result`, `Money`, IDs) and ISO 8583 codec
 
 See [docs/superpowers/specs/2026-08-15-aegis-design.md](docs/superpowers/specs/2026-08-15-aegis-design.md)
