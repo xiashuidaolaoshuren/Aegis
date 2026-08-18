@@ -1,0 +1,9 @@
+/build/
+/out/
+/vcpkg_installed/
+*.user
+.vs/
+.vscode/
+.cache/
+compile_commands.json
+*.log
