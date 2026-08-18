@@ -64,7 +64,7 @@ Ship a CMake/vcpkg project named `Aegis` that builds the `aegis` static library 
 
 ### T1 — Toolchain skeleton
 
-- [ ] **Do:** CMake project `Aegis`, presets, vcpkg (gtest), `.gitignore`, `.clang-format`, empty `aegis` lib that compiles, `aegis_tests` that runs one dummy test, README stub.
+- [X] **Do:** CMake project `Aegis`, presets, vcpkg (gtest), `.gitignore`, `.clang-format`, empty `aegis` lib that compiles, `aegis_tests` that runs one dummy test, README stub.
 - **Blocked by:** —
 - **Plan mode:** high
 - **TDD suitable:** no
