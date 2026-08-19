@@ -115,7 +115,7 @@ Ship a CMake/vcpkg project named `Aegis` that builds the `aegis` static library 
 
 ### T4 — ISO 8583 field table + message model
 
-- [ ] **Do:** `constexpr` spec for fields 2,3,4,7,11–13,37–39,41,42,49,52,90 and MTIs 0100/0110, 0200/0210, 0400/0410, 0800/0810. Message object holds present bitmap fields.
+- [X] **Do:** `constexpr` spec for fields 2,3,4,7,11–13,37–39,41,42,49,52,90 and MTIs 0100/0110, 0200/0210, 0400/0410, 0800/0810. Message object holds present bitmap fields.
 
 - **Blocked by:** T3
 - **Plan mode:** high
