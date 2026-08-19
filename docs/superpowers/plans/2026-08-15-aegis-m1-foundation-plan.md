@@ -158,5 +158,6 @@ Per subtask, obey `TDD suitable`: `yes` means strict **test-driven-development**
 | ---------- | ------------------------------------------------------------------------------------------------------ |
 | 2026-08-15 | Initial plan                                                                                           |
 | 2026-08-18 | Local Windows toolchain is VS Build Tools 2026; `windows-msvc` uses generator `Visual Studio 18 2026`. |
+| 2026-08-19 | T4 adds `tests/iso8583_message_test.cpp` (omitted from original file map). |
 
 
