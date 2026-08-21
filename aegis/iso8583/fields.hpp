@@ -50,7 +50,7 @@ enum class Mti : std::uint16_t {
 
 enum class MessageError { FieldAbsent, UnknownField, InvalidMti };
 
-inline constexpr std::array<FieldSpec, 16> kFieldTable{{
+inline constexpr std::array<FieldSpec, 15> kFieldTable{{
     {FieldId::Pan, Encoding::Bcd, LengthKind::Llvar, 13, 19},
     {FieldId::ProcessingCode, Encoding::Bcd, LengthKind::Fixed, 6, 6},
     {FieldId::Amount, Encoding::Bcd, LengthKind::Fixed, 12, 12},
