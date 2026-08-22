@@ -126,7 +126,7 @@ Ship a CMake/vcpkg project named `Aegis` that builds the `aegis` static library 
 
 ### T5 — Codec parse and serialise
 
-- [ ] **Do:** Length-agnostic codec over `span`; malformed input → `Result` error, never exception/crash. Round-trip every in-scope field encoding.
+- [X] **Do:** Length-agnostic codec over `span`; malformed input → `Result` error, never exception/crash. Round-trip every in-scope field encoding.
 
 - **Blocked by:** T4
 - **Plan mode:** high
