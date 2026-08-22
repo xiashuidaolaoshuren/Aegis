@@ -201,5 +201,96 @@ TEST(Iso8583CodecTest, AllInScopeFieldsRoundTrip) {
     }
 }
 
+TEST(Iso8583CodecTest, ShortFixedBcdValueIsLeftPadded) {
+    Message original{Mti::AuthorizationRequest};
+    ASSERT_TRUE(original.set(FieldId::Amount, "100").has_value());
+    const auto encoded = serialise(original);
+    ASSERT_TRUE(encoded.has_value());
+    const auto parsed = parse(encoded.value());
+    ASSERT_TRUE(parsed.has_value());
+    auto amount = parsed.value().get(FieldId::Amount);
+    ASSERT_TRUE(amount.has_value());
+    EXPECT_EQ(amount.value(), "000000000100");
+}
+
+TEST(Iso8583CodecTest, OverlongAsciiIsRejected) {
+    Message original{Mti::AuthorizationRequest};
+    ASSERT_TRUE(original.set(FieldId::ResponseCode, "000").has_value());
+    const auto encoded = serialise(original);
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error(), CodecError::InvalidLength);
+}
+
+TEST(Iso8583CodecTest, OverlongBinaryIsRejected) {
+    const std::string pin_block(9, '\x01');
+    Message original{Mti::AuthorizationRequest};
+    ASSERT_TRUE(original.set(FieldId::PinBlock, pin_block).has_value());
+    const auto encoded = serialise(original);
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error(), CodecError::InvalidLength);
+}
+
+TEST(Iso8583CodecTest, LlvarPanTooShortIsRejected) {
+    const std::array<std::byte, 17> bytes{
+        std::byte{0x01},
+        std::byte{0x00},
+        std::byte{0x40},
+        std::byte{0},
+        std::byte{0},
+        std::byte{0},
+        std::byte{0},
+        std::byte{0},
+        std::byte{0},
+        std::byte{0},
+        std::byte{0x12},
+        std::byte{0x12},
+        std::byte{0x34},
+        std::byte{0x56},
+        std::byte{0x78},
+        std::byte{0x90},
+        std::byte{0x12},
+    };
+    const auto result = parse(bytes);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), CodecError::InvalidLength);
+}
+
+TEST(Iso8583CodecTest, LlvarPanTooLongIsRejected) {
+    const std::array<std::byte, 21> bytes{
+        std::byte{0x01},
+        std::byte{0x00},
+        std::byte{0x40},
+        std::byte{0},
+        std::byte{0},
+        std::byte{0},
+        std::byte{0},
+        std::byte{0},
+        std::byte{0},
+        std::byte{0},
+        std::byte{0x20},
+        std::byte{0x12},
+        std::byte{0x34},
+        std::byte{0x56},
+        std::byte{0x78},
+        std::byte{0x90},
+        std::byte{0x12},
+        std::byte{0x34},
+        std::byte{0x56},
+        std::byte{0x78},
+        std::byte{0x90},
+    };
+    const auto result = parse(bytes);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), CodecError::InvalidLength);
+}
+
+TEST(Iso8583CodecTest, NonDigitBcdIsRejected) {
+    Message original{Mti::AuthorizationRequest};
+    ASSERT_TRUE(original.set(FieldId::Amount, "12AB45").has_value());
+    const auto encoded = serialise(original);
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error(), CodecError::Malformed);
+}
+
 } // namespace
 } // namespace aegis::iso8583

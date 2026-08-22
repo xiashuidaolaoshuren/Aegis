@@ -47,8 +47,29 @@ inline void set_bitmap_bit(std::span<std::byte> bitmap, std::uint8_t field) {
     return (static_cast<std::size_t>(digit_count) + 1U) / 2U;
 }
 
+[[nodiscard]] inline bool is_decimal_string(const std::string& digits) {
+    for (const char c : digits) {
+        if (c < '0' || c > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] inline bool packed_bcd_nibbles_valid(std::span<const std::byte> packed) {
+    for (const std::byte b : packed) {
+        const auto value = static_cast<std::uint8_t>(b);
+        if ((value >> 4) > 9U || (value & 0x0FU) > 9U) {
+            return false;
+        }
+    }
+    return true;
+}
+
 inline void append_packed_bcd(std::vector<std::byte>& out, std::string digits, std::uint8_t digit_count) {
-    digits.resize(digit_count, '0');
+    if (digits.size() < digit_count) {
+        digits.insert(digits.begin(), digit_count - digits.size(), '0');
+    }
     if (digit_count % 2U != 0U) {
         digits.insert(digits.begin(), '0');
     }
@@ -141,8 +162,12 @@ inline void append_packed_bcd(std::vector<std::byte>& out, std::string digits, s
             if (bytes.size() - offset < packed_size) {
                 return Result<Message, CodecError>::err(CodecError::Truncated);
             }
+            const auto packed = bytes.subspan(offset, packed_size);
+            if (!detail::packed_bcd_nibbles_valid(packed)) {
+                return Result<Message, CodecError>::err(CodecError::Malformed);
+            }
             (void)message.set(
-                spec->id, detail::unpack_packed_bcd(bytes.subspan(offset, packed_size), spec->max_length));
+                spec->id, detail::unpack_packed_bcd(packed, spec->max_length));
             offset += packed_size;
             continue;
         }
@@ -151,14 +176,25 @@ inline void append_packed_bcd(std::vector<std::byte>& out, std::string digits, s
                 return Result<Message, CodecError>::err(CodecError::Truncated);
             }
             const auto length_byte = static_cast<std::uint8_t>(bytes[offset]);
-            const auto digit_count = static_cast<std::uint8_t>(((length_byte >> 4) * 10) + (length_byte & 0x0F));
+            const auto hi = static_cast<std::uint8_t>(length_byte >> 4);
+            const auto lo = static_cast<std::uint8_t>(length_byte & 0x0F);
+            if (hi > 9U || lo > 9U) {
+                return Result<Message, CodecError>::err(CodecError::Malformed);
+            }
+            const auto digit_count = static_cast<std::uint8_t>(hi * 10U + lo);
+            if (digit_count < spec->min_length || digit_count > spec->max_length) {
+                return Result<Message, CodecError>::err(CodecError::InvalidLength);
+            }
             ++offset;
             const std::size_t packed_size = detail::packed_bcd_size(digit_count);
             if (bytes.size() - offset < packed_size) {
                 return Result<Message, CodecError>::err(CodecError::Truncated);
             }
-            (void)message.set(
-                spec->id, detail::unpack_packed_bcd(bytes.subspan(offset, packed_size), digit_count));
+            const auto packed = bytes.subspan(offset, packed_size);
+            if (!detail::packed_bcd_nibbles_valid(packed)) {
+                return Result<Message, CodecError>::err(CodecError::Malformed);
+            }
+            (void)message.set(spec->id, detail::unpack_packed_bcd(packed, digit_count));
             offset += packed_size;
         }
         if (spec->encoding == Encoding::Binary) {
@@ -204,6 +240,9 @@ inline void append_packed_bcd(std::vector<std::byte>& out, std::string digits, s
         auto field = message.get(spec.id);
         std::string value = field.value();
         if (spec.encoding == Encoding::Ascii) {
+            if (value.size() > spec.max_length) {
+                return Result<std::vector<std::byte>, CodecError>::err(CodecError::InvalidLength);
+            }
             detail::set_bitmap_bit(bitmap, field_id);
             value.resize(spec.max_length, ' ');
             for (std::uint8_t i = 0; i < spec.max_length; ++i) {
@@ -212,11 +251,23 @@ inline void append_packed_bcd(std::vector<std::byte>& out, std::string digits, s
             continue;
         }
         if (spec.encoding == Encoding::Bcd && spec.length_kind == LengthKind::Fixed) {
+            if (value.size() > spec.max_length) {
+                return Result<std::vector<std::byte>, CodecError>::err(CodecError::InvalidLength);
+            }
+            if (!detail::is_decimal_string(value)) {
+                return Result<std::vector<std::byte>, CodecError>::err(CodecError::Malformed);
+            }
             detail::set_bitmap_bit(bitmap, field_id);
             detail::append_packed_bcd(field_bytes, std::move(value), spec.max_length);
             continue;
         }
         if (spec.encoding == Encoding::Bcd && spec.length_kind == LengthKind::Llvar) {
+            if (value.size() < spec.min_length || value.size() > spec.max_length) {
+                return Result<std::vector<std::byte>, CodecError>::err(CodecError::InvalidLength);
+            }
+            if (!detail::is_decimal_string(value)) {
+                return Result<std::vector<std::byte>, CodecError>::err(CodecError::Malformed);
+            }
             detail::set_bitmap_bit(bitmap, field_id);
             const auto digit_count = static_cast<std::uint8_t>(value.size());
             const auto hi = static_cast<std::uint8_t>(digit_count / 10);
@@ -226,8 +277,10 @@ inline void append_packed_bcd(std::vector<std::byte>& out, std::string digits, s
             continue;
         }
         if (spec.encoding == Encoding::Binary) {
+            if (value.size() != spec.max_length) {
+                return Result<std::vector<std::byte>, CodecError>::err(CodecError::InvalidLength);
+            }
             detail::set_bitmap_bit(bitmap, field_id);
-            value.resize(spec.max_length, '\0');
             for (std::uint8_t i = 0; i < spec.max_length; ++i) {
                 field_bytes.push_back(static_cast<std::byte>(value[i]));
             }
