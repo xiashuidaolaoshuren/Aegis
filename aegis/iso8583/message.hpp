@@ -4,6 +4,7 @@
 
 #include <map>
 #include <string>
+#include <variant>
 
 namespace aegis::iso8583 {
 
