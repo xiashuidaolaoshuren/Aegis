@@ -36,6 +36,7 @@ CI runs on push and pull requests via [`.github/workflows/ci.yml`](.github/workf
 
 - **linux-clang** — Clang build and `ctest` on `ubuntu-latest`
 - **linux-clang-asan** — same with AddressSanitizer (`linux-clang-asan` preset)
+- **linux-clang-fuzz** — libFuzzer smoke on the ISO 8583 parser (30s)
 
 To run the ASan preset locally on Linux:
 
@@ -48,9 +49,36 @@ ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 ctest --preset linux-clang-asan --o
 ThreadSanitizer (TSan) is planned for M4 when concurrent engine code exists; M1
 only ships the ASan preset.
 
+## Property and fuzz tests
+
+The ISO 8583 codec has a corpus-driven round-trip property test and a libFuzzer
+harness. Seed files live in `fuzz/corpus/` (raw wire bytes, no TCP length
+prefix). `ctest` reads them from the source tree on every platform.
+
+Regenerate seeds after changing the codec:
+
+```powershell
+cmake --build --preset windows-msvc --config Debug --target gen_corpus
+.\build\windows-msvc\fuzz\Debug\gen_corpus.exe fuzz/corpus
+ctest --preset windows-msvc -C Debug -R Iso8583RoundTrip
+```
+
+On Linux, the fuzzer is an optional Clang target:
+
+```bash
+cmake --preset linux-clang -DAEGIS_BUILD_FUZZER=ON
+cmake --build --preset linux-clang
+./build/linux-clang/fuzz/gen_corpus fuzz/corpus
+./build/linux-clang/fuzz/aegis_fuzz fuzz/corpus/ -max_total_time=30 -print_final_stats=1
+```
+
+CI adds a **linux-clang-fuzz** job that runs the same 30-second smoke. The
+harness only requires that `parse` never crashes; malformed input is a
+`Result` error.
+
 ## What's next
 
-- **T3+:** Domain types (`Result`, `Money`, IDs) and ISO 8583 codec
+- **M2:** Ledger (double-entry, holds, WAL, crash recovery)
 
 See [docs/superpowers/specs/2026-08-15-aegis-design.md](docs/superpowers/specs/2026-08-15-aegis-design.md)
 for the full design.

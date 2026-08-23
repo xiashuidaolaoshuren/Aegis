@@ -1,0 +1,13 @@
+add_executable(gen_corpus gen_corpus.cpp)
+target_link_libraries(gen_corpus PRIVATE aegis)
+
+if(AEGIS_BUILD_FUZZER)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        add_executable(aegis_fuzz iso8583_fuzz.cpp)
+        target_link_libraries(aegis_fuzz PRIVATE aegis)
+        target_compile_options(aegis_fuzz PRIVATE -fsanitize=fuzzer,address -fno-omit-frame-pointer -g)
+        target_link_options(aegis_fuzz PRIVATE -fsanitize=fuzzer,address)
+    else()
+        message(WARNING "AEGIS_BUILD_FUZZER is ON but compiler is ${CMAKE_CXX_COMPILER_ID}; aegis_fuzz requires Clang")
+    endif()
+endif()

@@ -91,3 +91,53 @@ jobs:
         run: ctest --preset linux-clang-asan --output-on-failure
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+
+  linux-clang-fuzz:
+    name: linux-clang-fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang
+          CLANG_VER=$(clang -dumpversion | cut -d. -f1)
+          sudo apt-get install -y "libclang-rt-${CLANG_VER}-dev" "libfuzzer-${CLANG_VER}-dev" \
+            || sudo apt-get install -y libclang-rt-dev
+
+      - name: Setup vcpkg
+        run: |
+          if [ -d /usr/local/share/vcpkg ]; then
+            VCPKG_ROOT=/usr/local/share/vcpkg
+          else
+            git clone --depth 1 https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+            VCPKG_ROOT="$HOME/vcpkg"
+          fi
+          if [ ! -x "$VCPKG_ROOT/vcpkg" ]; then
+            "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+          fi
+          echo "VCPKG_ROOT=$VCPKG_ROOT" >> "$GITHUB_ENV"
+
+      - name: Cache vcpkg archives
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-${{ hashFiles('vcpkg.json') }}-linux-clang-fuzz-${{ runner.os }}
+          restore-keys: |
+            vcpkg-${{ hashFiles('vcpkg.json') }}-
+            vcpkg-
+
+      - name: Configure
+        run: cmake --preset linux-clang -DAEGIS_BUILD_FUZZER=ON
+
+      - name: Build
+        run: cmake --build --preset linux-clang
+
+      - name: Generate corpus
+        run: ./build/linux-clang/fuzz/gen_corpus fuzz/corpus
+
+      - name: Fuzzer smoke
+        run: ./build/linux-clang/fuzz/aegis_fuzz fuzz/corpus/ -max_total_time=30 -print_final_stats=1
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
