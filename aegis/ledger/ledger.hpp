@@ -2,6 +2,7 @@
 
 #include <aegis/ids.hpp>
 #include <aegis/ledger/bucket.hpp>
+#include <aegis/ledger/hold.hpp>
 #include <aegis/money.hpp>
 #include <aegis/result.hpp>
 
@@ -11,9 +12,8 @@
 namespace aegis::ledger {
 
 class Wallet;
-struct Hold;
 
-enum class LedgerError { InsufficientFunds, UnknownWallet };
+enum class LedgerError { InsufficientFunds, UnknownWallet, AmountMismatch, UnknownHold };
 
 class Ledger {
 public:
@@ -29,6 +29,7 @@ public:
         AccountId cardholder,
         Money amount,
         MerchantId merchant);
+    [[nodiscard]] Result<void, LedgerError> capture(HoldId hold, Money amount);
     [[nodiscard]] Result<Money, LedgerError> balance(AccountId id, Bucket bucket) const;
     [[nodiscard]] std::size_t live_hold_count() const;
 

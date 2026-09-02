@@ -1,17 +1,32 @@
 #include <aegis/ledger/ledger.hpp>
 
+#include <aegis/ledger/fee.hpp>
 #include <aegis/ledger/hold.hpp>
 #include <aegis/ledger/posting.hpp>
 #include <aegis/ledger/wallet.hpp>
 
 #include <utility>
-#include <vector>
+#include <unordered_map>
 
 namespace aegis::ledger {
 
+namespace {
+
+[[nodiscard]] Result<AccountId, LedgerError> find_system_account(
+    const std::unordered_map<AccountId, Wallet>& wallets) {
+    for (const auto& [id, wallet] : wallets) {
+        if (wallet.kind() == WalletKind::System) {
+            return Result<AccountId, LedgerError>::ok(id);
+        }
+    }
+    return Result<AccountId, LedgerError>::err(LedgerError::UnknownWallet);
+}
+
+} // namespace
+
 struct Ledger::Impl {
     std::unordered_map<AccountId, Wallet> wallets;
-    std::vector<Hold> holds;
+    std::unordered_map<HoldId, Hold> holds;
     std::uint64_t next_hold_id{1};
 };
 
@@ -66,8 +81,47 @@ Result<Hold, LedgerError> Ledger::reserve(
         merchant,
         amount,
     };
-    impl_->holds.push_back(hold);
+    impl_->holds.emplace(hold.id, hold);
     return Result<Hold, LedgerError>::ok(hold);
+}
+
+Result<void, LedgerError> Ledger::capture(HoldId hold_id, Money amount) {
+    const auto hold_it = impl_->holds.find(hold_id);
+    if (hold_it == impl_->holds.end()) {
+        return Result<void, LedgerError>::err(LedgerError::UnknownHold);
+    }
+
+    const Hold& hold = hold_it->second;
+    if (hold.amount != amount) {
+        return Result<void, LedgerError>::err(LedgerError::AmountMismatch);
+    }
+
+    const AccountId merchant_account{hold.merchant.value()};
+
+    if (impl_->wallets.find(merchant_account) == impl_->wallets.end()) {
+        return Result<void, LedgerError>::err(LedgerError::UnknownWallet);
+    }
+
+    const auto system_account = find_system_account(impl_->wallets);
+    if (!system_account.has_value()) {
+        return Result<void, LedgerError>::err(system_account.error());
+    }
+
+    const CaptureSplit split = split_capture(amount);
+    const PostingBatch batch{
+        PostingLine{hold.cardholder, Bucket::Holds, amount, false},
+        PostingLine{merchant_account, Bucket::Payable, split.payable, true},
+        PostingLine{system_account.value(), Bucket::Interchange, split.interchange, true},
+    };
+    assert_balanced(batch);
+
+    const auto apply_result = apply_batch(impl_->wallets, batch);
+    if (!apply_result.has_value()) {
+        return Result<void, LedgerError>::err(LedgerError::UnknownWallet);
+    }
+
+    impl_->holds.erase(hold_it);
+    return Result<void, LedgerError>::ok();
 }
 
 Result<Money, LedgerError> Ledger::balance(AccountId id, Bucket bucket) const {
