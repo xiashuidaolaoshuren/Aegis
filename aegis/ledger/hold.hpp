@@ -4,9 +4,12 @@
 #include <aegis/money.hpp>
 #include <aegis/tagged.hpp>
 
+#include <chrono>
 #include <cstdint>
 
 namespace aegis::ledger {
+
+using TimePoint = std::chrono::steady_clock::time_point;
 
 struct HoldIdTag {};
 
@@ -17,6 +20,7 @@ struct Hold {
     AccountId cardholder;
     MerchantId merchant;
     Money amount;
+    TimePoint expires_at;
 };
 
 } // namespace aegis::ledger

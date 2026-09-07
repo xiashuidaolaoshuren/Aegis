@@ -9,6 +9,7 @@
 #include <aegis/money.hpp>
 
 #include <array>
+#include <chrono>
 
 namespace aegis::ledger {
 namespace {
@@ -239,6 +240,165 @@ TEST(LifecycleTest, CaptureRejectsUnknownHold) {
     EXPECT_EQ(payable.value(), expected_payable);
     EXPECT_EQ(interchange.value(), expected_interchange);
     EXPECT_EQ(ledger.live_hold_count(), 0U);
+}
+
+TEST(LifecycleTest, ReverseReleasesHoldToAvailable) {
+    Ledger ledger = make_ledger_from_tiny_genesis();
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const Money amount{Currency::Usd, 5000};
+    const MerchantId merchant_id{"m-1"};
+
+    const auto reserve_result = ledger.reserve(cardholder_id, amount, merchant_id);
+    ASSERT_TRUE(reserve_result.has_value());
+    const HoldId hold_id = reserve_result.value().id;
+
+    const auto reverse_result = ledger.reverse(hold_id);
+    ASSERT_TRUE(reverse_result.has_value());
+
+    const Money expected_available{Currency::Usd, 10000};
+    const Money expected_holds{Currency::Usd, 0};
+    const auto available = ledger.balance(cardholder_id, Bucket::Available);
+    const auto holds = ledger.balance(cardholder_id, Bucket::Holds);
+
+    ASSERT_TRUE(available.has_value());
+    ASSERT_TRUE(holds.has_value());
+    EXPECT_EQ(available.value(), expected_available);
+    EXPECT_EQ(holds.value(), expected_holds);
+    EXPECT_EQ(ledger.live_hold_count(), 0U);
+}
+
+TEST(LifecycleTest, ReverseAfterCaptureFails) {
+    Ledger ledger = make_ledger_from_tiny_genesis();
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const AccountId merchant_id{"m-1"};
+    const Money amount{Currency::Usd, 5000};
+    const MerchantId merchant{merchant_id.value()};
+
+    const auto reserve_result = ledger.reserve(cardholder_id, amount, merchant);
+    ASSERT_TRUE(reserve_result.has_value());
+    const HoldId hold_id = reserve_result.value().id;
+
+    const auto capture_result = ledger.capture(hold_id, amount);
+    ASSERT_TRUE(capture_result.has_value());
+
+    const auto reverse_result = ledger.reverse(hold_id);
+    ASSERT_FALSE(reverse_result.has_value());
+    EXPECT_EQ(reverse_result.error(), LedgerError::UnknownHold);
+
+    const Money expected_holds{Currency::Usd, 0};
+    const Money expected_payable{Currency::Usd, 4855};
+    const Money expected_interchange{Currency::Usd, 145};
+
+    const auto holds = ledger.balance(cardholder_id, Bucket::Holds);
+    const auto payable = ledger.balance(merchant_id, Bucket::Payable);
+    const auto interchange = ledger.balance(AccountId{"system"}, Bucket::Interchange);
+
+    ASSERT_TRUE(holds.has_value());
+    ASSERT_TRUE(payable.has_value());
+    ASSERT_TRUE(interchange.has_value());
+    EXPECT_EQ(holds.value(), expected_holds);
+    EXPECT_EQ(payable.value(), expected_payable);
+    EXPECT_EQ(interchange.value(), expected_interchange);
+    EXPECT_EQ(ledger.live_hold_count(), 0U);
+}
+
+TEST(LifecycleTest, ReverseRejectsUnknownHold) {
+    Ledger ledger = make_ledger_from_tiny_genesis();
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const Money amount{Currency::Usd, 5000};
+    const MerchantId merchant_id{"m-1"};
+
+    const auto reserve_result = ledger.reserve(cardholder_id, amount, merchant_id);
+    ASSERT_TRUE(reserve_result.has_value());
+
+    const HoldId missing_hold_id{999};
+    const auto reverse_result = ledger.reverse(missing_hold_id);
+    ASSERT_FALSE(reverse_result.has_value());
+    EXPECT_EQ(reverse_result.error(), LedgerError::UnknownHold);
+
+    const Money expected_available{Currency::Usd, 5000};
+    const Money expected_holds{Currency::Usd, 5000};
+    const auto available = ledger.balance(cardholder_id, Bucket::Available);
+    const auto holds = ledger.balance(cardholder_id, Bucket::Holds);
+
+    ASSERT_TRUE(available.has_value());
+    ASSERT_TRUE(holds.has_value());
+    EXPECT_EQ(available.value(), expected_available);
+    EXPECT_EQ(holds.value(), expected_holds);
+    EXPECT_EQ(ledger.live_hold_count(), 1U);
+}
+
+TEST(LifecycleTest, ExpireDueReleasesHold) {
+    Ledger ledger = make_ledger_from_tiny_genesis();
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const Money amount{Currency::Usd, 5000};
+    const MerchantId merchant_id{"m-1"};
+    const TimePoint now{};
+
+    ledger.set_hold_ttl(std::chrono::seconds{0});
+
+    const auto reserve_result = ledger.reserve(cardholder_id, amount, merchant_id, now);
+    ASSERT_TRUE(reserve_result.has_value());
+
+    const std::size_t expired_count = ledger.expire_due(now);
+    EXPECT_EQ(expired_count, 1U);
+
+    const Money expected_available{Currency::Usd, 10000};
+    const Money expected_holds{Currency::Usd, 0};
+    const auto available = ledger.balance(cardholder_id, Bucket::Available);
+    const auto holds = ledger.balance(cardholder_id, Bucket::Holds);
+
+    ASSERT_TRUE(available.has_value());
+    ASSERT_TRUE(holds.has_value());
+    EXPECT_EQ(available.value(), expected_available);
+    EXPECT_EQ(holds.value(), expected_holds);
+    EXPECT_EQ(ledger.live_hold_count(), 0U);
+}
+
+TEST(LifecycleTest, ExpireDueRespectsHoldTtl) {
+    Ledger ledger = make_ledger_from_tiny_genesis();
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const Money amount{Currency::Usd, 5000};
+    const MerchantId merchant_id{"m-1"};
+    const TimePoint now{};
+
+    ledger.set_hold_ttl(std::chrono::seconds{5});
+
+    const auto reserve_result = ledger.reserve(cardholder_id, amount, merchant_id, now);
+    ASSERT_TRUE(reserve_result.has_value());
+    EXPECT_EQ(reserve_result.value().expires_at, now + std::chrono::seconds{5});
+
+    const TimePoint before_expiry = now + std::chrono::seconds{3};
+    const TimePoint at_expiry = now + std::chrono::seconds{5};
+
+    EXPECT_EQ(ledger.expire_due(before_expiry), 0U);
+    EXPECT_EQ(ledger.live_hold_count(), 1U);
+
+    const Money expected_available_before{Currency::Usd, 5000};
+    const Money expected_holds_before{Currency::Usd, 5000};
+    const auto available_before = ledger.balance(cardholder_id, Bucket::Available);
+    const auto holds_before = ledger.balance(cardholder_id, Bucket::Holds);
+    ASSERT_TRUE(available_before.has_value());
+    ASSERT_TRUE(holds_before.has_value());
+    EXPECT_EQ(available_before.value(), expected_available_before);
+    EXPECT_EQ(holds_before.value(), expected_holds_before);
+
+    EXPECT_EQ(ledger.expire_due(at_expiry), 1U);
+    EXPECT_EQ(ledger.live_hold_count(), 0U);
+
+    const Money expected_available_after{Currency::Usd, 10000};
+    const Money expected_holds_after{Currency::Usd, 0};
+    const auto available_after = ledger.balance(cardholder_id, Bucket::Available);
+    const auto holds_after = ledger.balance(cardholder_id, Bucket::Holds);
+    ASSERT_TRUE(available_after.has_value());
+    ASSERT_TRUE(holds_after.has_value());
+    EXPECT_EQ(available_after.value(), expected_available_after);
+    EXPECT_EQ(holds_after.value(), expected_holds_after);
 }
 
 } // namespace

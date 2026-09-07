@@ -6,6 +6,7 @@
 #include <aegis/money.hpp>
 #include <aegis/result.hpp>
 
+#include <chrono>
 #include <cstddef>
 #include <unordered_map>
 
@@ -28,8 +29,12 @@ public:
     [[nodiscard]] Result<Hold, LedgerError> reserve(
         AccountId cardholder,
         Money amount,
-        MerchantId merchant);
+        MerchantId merchant,
+        TimePoint now = TimePoint{});
     [[nodiscard]] Result<void, LedgerError> capture(HoldId hold, Money amount);
+    [[nodiscard]] Result<void, LedgerError> reverse(HoldId hold);
+    [[nodiscard]] std::size_t expire_due(TimePoint now);
+    void set_hold_ttl(std::chrono::seconds ttl);
     [[nodiscard]] Result<Money, LedgerError> balance(AccountId id, Bucket bucket) const;
     [[nodiscard]] std::size_t live_hold_count() const;
 

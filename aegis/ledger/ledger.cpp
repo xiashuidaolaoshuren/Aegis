@@ -7,6 +7,7 @@
 
 #include <utility>
 #include <unordered_map>
+#include <chrono>
 
 namespace aegis::ledger {
 
@@ -22,12 +23,29 @@ namespace {
     return Result<AccountId, LedgerError>::err(LedgerError::UnknownWallet);
 }
 
+[[nodiscard]] Result<void, LedgerError> release_hold(
+    std::unordered_map<AccountId, Wallet>& wallets,
+    const Hold& hold) {
+    const PostingBatch batch{
+        PostingLine{hold.cardholder, Bucket::Holds, hold.amount, false},
+        PostingLine{hold.cardholder, Bucket::Available, hold.amount, true},
+    };
+    assert_balanced(batch);
+
+    const auto apply_result = apply_batch(wallets, batch);
+    if (!apply_result.has_value()) {
+        return Result<void, LedgerError>::err(LedgerError::UnknownWallet);
+    }
+    return Result<void, LedgerError>::ok();
+}
+
 } // namespace
 
 struct Ledger::Impl {
     std::unordered_map<AccountId, Wallet> wallets;
     std::unordered_map<HoldId, Hold> holds;
     std::uint64_t next_hold_id{1};
+    std::chrono::seconds hold_ttl{std::chrono::hours{24}};
 };
 
 Ledger::Ledger(std::unordered_map<AccountId, Wallet> wallets)
@@ -53,7 +71,8 @@ Ledger::~Ledger() {
 Result<Hold, LedgerError> Ledger::reserve(
     AccountId cardholder,
     Money amount,
-    MerchantId merchant) {
+    MerchantId merchant,
+    TimePoint now) {
     const auto it = impl_->wallets.find(cardholder);
     if (it == impl_->wallets.end()) {
         return Result<Hold, LedgerError>::err(LedgerError::UnknownWallet);
@@ -80,6 +99,7 @@ Result<Hold, LedgerError> Ledger::reserve(
         cardholder,
         merchant,
         amount,
+        now + impl_->hold_ttl,
     };
     impl_->holds.emplace(hold.id, hold);
     return Result<Hold, LedgerError>::ok(hold);
@@ -122,6 +142,47 @@ Result<void, LedgerError> Ledger::capture(HoldId hold_id, Money amount) {
 
     impl_->holds.erase(hold_it);
     return Result<void, LedgerError>::ok();
+}
+
+Result<void, LedgerError> Ledger::reverse(HoldId hold_id) {
+    const auto hold_it = impl_->holds.find(hold_id);
+    if (hold_it == impl_->holds.end()) {
+        return Result<void, LedgerError>::err(LedgerError::UnknownHold);
+    }
+
+    const Hold& hold = hold_it->second;
+    const auto release_result = release_hold(impl_->wallets, hold);
+    if (!release_result.has_value()) {
+        return release_result;
+    }
+
+    impl_->holds.erase(hold_it);
+    return Result<void, LedgerError>::ok();
+}
+
+std::size_t Ledger::expire_due(TimePoint now) {
+    std::size_t expired_count = 0;
+
+    for (auto it = impl_->holds.begin(); it != impl_->holds.end();) {
+        if (it->second.expires_at <= now) {
+            const Hold& hold = it->second;
+            const auto release_result = release_hold(impl_->wallets, hold);
+            if (!release_result.has_value()) {
+                ++it;
+                continue;
+            }
+            it = impl_->holds.erase(it);
+            ++expired_count;
+        } else {
+            ++it;
+        }
+    }
+
+    return expired_count;
+}
+
+void Ledger::set_hold_ttl(std::chrono::seconds ttl) {
+    impl_->hold_ttl = ttl;
 }
 
 Result<Money, LedgerError> Ledger::balance(AccountId id, Bucket bucket) const {
