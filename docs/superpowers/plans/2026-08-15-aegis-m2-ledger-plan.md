@@ -97,7 +97,7 @@ Ship a single-threaded ledger inside `aegis`: wallets + buckets, genesis fixture
 
 ### T3 — Reserve (Hold) and funds check 51
 
-- [ ] **Do:** Intra-wallet Available→Holds; `51` if Available would go negative; no Hold posted on 51.
+- [x] **Do:** Intra-wallet Available→Holds; `51` if Available would go negative; no Hold posted on 51.
 
 - **Blocked by:** T2
 - **Plan mode:** high
@@ -108,7 +108,7 @@ Ship a single-threaded ledger inside `aegis`: wallets + buckets, genesis fixture
 
 ### T4 — Capture full amount + fee split
 
-- [ ] **Do:** Consume entire Hold; credit Merchant Payable and System Interchange; reject amount ≠ original; reject missing Hold; intra-process atomic (single thread).
+- [x] **Do:** Consume entire Hold; credit Merchant Payable and System Interchange; reject amount ≠ original; reject missing Hold; intra-process atomic (single thread).
 
 - **Blocked by:** T3
 - **Plan mode:** high
@@ -119,7 +119,7 @@ Ship a single-threaded ledger inside `aegis`: wallets + buckets, genesis fixture
 
 ### T5 — Reverse and TTL expiry
 
-- [ ] **Do:** Holds→Available; forbidden after capture; sweeper `expire_due(now)`; configurable TTL.
+- [x] **Do:** Holds→Available; forbidden after capture; sweeper `expire_due(now)`; configurable TTL.
 
 - **Blocked by:** T3
 - **Plan mode:** medium
