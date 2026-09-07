@@ -5,6 +5,7 @@
 #include <aegis/ledger/fee.hpp>
 #include <aegis/ledger/genesis.hpp>
 #include <aegis/ledger/hold.hpp>
+#include <aegis/ledger/idempotency.hpp>
 #include <aegis/ledger/ledger.hpp>
 #include <aegis/money.hpp>
 
@@ -399,6 +400,241 @@ TEST(LifecycleTest, ExpireDueRespectsHoldTtl) {
     ASSERT_TRUE(holds_after.has_value());
     EXPECT_EQ(available_after.value(), expected_available_after);
     EXPECT_EQ(holds_after.value(), expected_holds_after);
+}
+
+TEST(LifecycleTest, IdempotencyStoreStoresAndFindsReserveOutcome) {
+    IdempotencyStore store;
+    const IdempotencyKey key{
+        TerminalId{"TERM0001"},
+        Stan{123456},
+        Mmdd{907},
+    };
+
+    const Hold hold{
+        HoldId{1},
+        AccountId{"4242424242424242"},
+        MerchantId{"m-1"},
+        Money{Currency::Usd, 5000},
+        TimePoint{},
+    };
+    const Result<Hold, LedgerError> outcome = Result<Hold, LedgerError>::ok(hold);
+
+    store.store_reserve(key, outcome);
+    const Result<Hold, LedgerError>* found = store.find_reserve(key);
+    ASSERT_NE(found, nullptr);
+    ASSERT_TRUE(found->has_value());
+    EXPECT_EQ(found->value().id, hold.id);
+    EXPECT_EQ(found->value().amount, hold.amount);
+}
+
+Result<Hold, LedgerError> idempotent_reserve(
+    Ledger& ledger,
+    IdempotencyStore& store,
+    IdempotencyKey key,
+    AccountId cardholder,
+    Money amount,
+    MerchantId merchant) {
+    if (const Result<Hold, LedgerError>* cached = store.find_reserve(key)) {
+        return *cached;
+    }
+
+    const auto outcome = ledger.reserve(cardholder, amount, merchant);
+    store.store_reserve(key, outcome);
+    return outcome;
+}
+
+Result<void, LedgerError> idempotent_capture(
+    Ledger& ledger,
+    IdempotencyStore& store,
+    IdempotencyKey key,
+    HoldId hold_id,
+    Money amount) {
+    if (const Result<void, LedgerError>* cached = store.find_capture(key)) {
+        return *cached;
+    }
+
+    const auto outcome = ledger.capture(hold_id, amount);
+    store.store_capture(key, outcome);
+    return outcome;
+}
+
+Result<void, LedgerError> idempotent_reverse(
+    Ledger& ledger,
+    IdempotencyStore& store,
+    IdempotencyKey key,
+    HoldId hold_id) {
+    if (const Result<void, LedgerError>* cached = store.find_reverse(key)) {
+        return *cached;
+    }
+
+    const auto outcome = ledger.reverse(hold_id);
+    store.store_reverse(key, outcome);
+    return outcome;
+}
+
+TEST(LifecycleTest, DuplicateReverseReturnsStoredOutcome) {
+    Ledger ledger = make_ledger_from_tiny_genesis();
+    IdempotencyStore store;
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const Money amount{Currency::Usd, 5000};
+    const MerchantId merchant_id{"m-1"};
+
+    const IdempotencyKey auth_key{
+        TerminalId{"TERM0001"},
+        Stan{100001},
+        Mmdd{907},
+    };
+    const auto reserve_result =
+        idempotent_reserve(ledger, store, auth_key, cardholder_id, amount, merchant_id);
+    ASSERT_TRUE(reserve_result.has_value());
+    const HoldId hold_id = reserve_result.value().id;
+
+    const IdempotencyKey reverse_key{
+        TerminalId{"TERM0001"},
+        Stan{400001},
+        Mmdd{907},
+    };
+
+    const auto first = idempotent_reverse(ledger, store, reverse_key, hold_id);
+    ASSERT_TRUE(first.has_value());
+
+    const auto second = idempotent_reverse(ledger, store, reverse_key, hold_id);
+    ASSERT_TRUE(second.has_value());
+
+    const Money expected_available{Currency::Usd, 10000};
+    const Money expected_holds{Currency::Usd, 0};
+    const auto available = ledger.balance(cardholder_id, Bucket::Available);
+    const auto holds = ledger.balance(cardholder_id, Bucket::Holds);
+
+    ASSERT_TRUE(available.has_value());
+    ASSERT_TRUE(holds.has_value());
+    EXPECT_EQ(available.value(), expected_available);
+    EXPECT_EQ(holds.value(), expected_holds);
+    EXPECT_EQ(ledger.live_hold_count(), 0U);
+}
+
+TEST(LifecycleTest, DuplicateCaptureReturnsStoredOutcome) {
+    Ledger ledger = make_ledger_from_tiny_genesis();
+    IdempotencyStore store;
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const AccountId merchant_id{"m-1"};
+    const Money amount{Currency::Usd, 5000};
+    const MerchantId merchant{merchant_id.value()};
+
+    const IdempotencyKey auth_key{
+        TerminalId{"TERM0001"},
+        Stan{100001},
+        Mmdd{907},
+    };
+    const auto reserve_result =
+        idempotent_reserve(ledger, store, auth_key, cardholder_id, amount, merchant);
+    ASSERT_TRUE(reserve_result.has_value());
+    const HoldId hold_id = reserve_result.value().id;
+
+    const IdempotencyKey capture_key{
+        TerminalId{"TERM0001"},
+        Stan{200001},
+        Mmdd{907},
+    };
+
+    const auto first = idempotent_capture(ledger, store, capture_key, hold_id, amount);
+    ASSERT_TRUE(first.has_value());
+
+    const auto second = idempotent_capture(ledger, store, capture_key, hold_id, amount);
+    ASSERT_TRUE(second.has_value());
+
+    const Money expected_holds{Currency::Usd, 0};
+    const Money expected_payable{Currency::Usd, 4855};
+    const Money expected_interchange{Currency::Usd, 145};
+
+    const auto holds = ledger.balance(cardholder_id, Bucket::Holds);
+    const auto payable = ledger.balance(merchant_id, Bucket::Payable);
+    const auto interchange = ledger.balance(AccountId{"system"}, Bucket::Interchange);
+
+    ASSERT_TRUE(holds.has_value());
+    ASSERT_TRUE(payable.has_value());
+    ASSERT_TRUE(interchange.has_value());
+    EXPECT_EQ(holds.value(), expected_holds);
+    EXPECT_EQ(payable.value(), expected_payable);
+    EXPECT_EQ(interchange.value(), expected_interchange);
+    EXPECT_EQ(ledger.live_hold_count(), 0U);
+}
+
+TEST(LifecycleTest, DuplicateReserveReturnsStoredHold) {
+    Ledger ledger = make_ledger_from_tiny_genesis();
+    IdempotencyStore store;
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const Money amount{Currency::Usd, 5000};
+    const MerchantId merchant_id{"m-1"};
+    const IdempotencyKey key{
+        TerminalId{"TERM0001"},
+        Stan{100001},
+        Mmdd{907},
+    };
+
+    const auto first = idempotent_reserve(ledger, store, key, cardholder_id, amount, merchant_id);
+    ASSERT_TRUE(first.has_value());
+
+    const auto second = idempotent_reserve(ledger, store, key, cardholder_id, amount, merchant_id);
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(second.value().id, first.value().id);
+
+    const Money expected_available{Currency::Usd, 5000};
+    const Money expected_holds{Currency::Usd, 5000};
+    const auto available = ledger.balance(cardholder_id, Bucket::Available);
+    const auto holds = ledger.balance(cardholder_id, Bucket::Holds);
+
+    ASSERT_TRUE(available.has_value());
+    ASSERT_TRUE(holds.has_value());
+    EXPECT_EQ(available.value(), expected_available);
+    EXPECT_EQ(holds.value(), expected_holds);
+    EXPECT_EQ(ledger.live_hold_count(), 1U);
+}
+
+TEST(LifecycleTest, AuthKeyLocatesHoldForCapture) {
+    Ledger ledger = make_ledger_from_tiny_genesis();
+    IdempotencyStore store;
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const AccountId merchant_id{"m-1"};
+    const Money amount{Currency::Usd, 5000};
+    const MerchantId merchant{merchant_id.value()};
+
+    const IdempotencyKey auth_key{
+        TerminalId{"TERM0001"},
+        Stan{100001},
+        Mmdd{907},
+    };
+
+    const auto reserve_result =
+        idempotent_reserve(ledger, store, auth_key, cardholder_id, amount, merchant);
+    ASSERT_TRUE(reserve_result.has_value());
+
+    const HoldId* hold_id = store.find_hold_id(auth_key);
+    ASSERT_NE(hold_id, nullptr);
+    EXPECT_EQ(*hold_id, reserve_result.value().id);
+
+    const IdempotencyKey capture_key{
+        TerminalId{"TERM0001"},
+        Stan{200002},
+        Mmdd{907},
+    };
+    const auto capture_result =
+        idempotent_capture(ledger, store, capture_key, *hold_id, amount);
+    ASSERT_TRUE(capture_result.has_value());
+
+    const Money expected_payable{Currency::Usd, 4855};
+    const Money expected_interchange{Currency::Usd, 145};
+    const auto payable = ledger.balance(merchant_id, Bucket::Payable);
+    const auto interchange = ledger.balance(AccountId{"system"}, Bucket::Interchange);
+
+    ASSERT_TRUE(payable.has_value());
+    ASSERT_TRUE(interchange.has_value());
+    EXPECT_EQ(payable.value(), expected_payable);
+    EXPECT_EQ(interchange.value(), expected_interchange);
 }
 
 } // namespace
