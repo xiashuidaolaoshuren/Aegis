@@ -141,7 +141,7 @@ Ship a single-threaded ledger inside `aegis`: wallets + buckets, genesis fixture
 
 ### T7 — WAL + shadow crash recovery
 
-- [ ] **Do:** Append postings/holds to WAL; replay rebuilds buckets; test kills logically (close without flush vs replay) and compares shadow model.
+- [x] **Do:** Append postings/holds to WAL; replay rebuilds buckets; test kills logically (close without flush vs replay) and compares shadow model.
 
 - **Blocked by:** T6
 - **Plan mode:** high

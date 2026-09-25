@@ -3,11 +3,13 @@
 #include <aegis/ledger/fee.hpp>
 #include <aegis/ledger/hold.hpp>
 #include <aegis/ledger/posting.hpp>
+#include <aegis/ledger/wal.hpp>
 #include <aegis/ledger/wallet.hpp>
 
 #include <utility>
 #include <unordered_map>
 #include <chrono>
+#include <vector>
 
 namespace aegis::ledger {
 
@@ -46,10 +48,22 @@ struct Ledger::Impl {
     std::unordered_map<HoldId, Hold> holds;
     std::uint64_t next_hold_id{1};
     std::chrono::seconds hold_ttl{std::chrono::hours{24}};
+    Wal* wal{nullptr};
 };
 
 Ledger::Ledger(std::unordered_map<AccountId, Wallet> wallets)
-    : impl_(new Impl{std::move(wallets), {}, 1}) {}
+    : impl_(new Impl{std::move(wallets), {}, 1, std::chrono::hours{24}, nullptr}) {}
+
+Ledger::Ledger(
+    std::unordered_map<AccountId, Wallet> wallets,
+    std::unordered_map<HoldId, Hold> holds,
+    std::uint64_t next_hold_id)
+    : impl_(new Impl{
+          std::move(wallets),
+          std::move(holds),
+          next_hold_id,
+          std::chrono::hours{24},
+          nullptr}) {}
 
 Ledger::Ledger(Ledger&& other) noexcept : impl_(other.impl_) {
     other.impl_ = nullptr;
@@ -102,6 +116,9 @@ Result<Hold, LedgerError> Ledger::reserve(
         now + impl_->hold_ttl,
     };
     impl_->holds.emplace(hold.id, hold);
+    if (impl_->wal != nullptr) {
+        impl_->wal->append_reserve(hold);
+    }
     return Result<Hold, LedgerError>::ok(hold);
 }
 
@@ -141,6 +158,9 @@ Result<void, LedgerError> Ledger::capture(HoldId hold_id, Money amount) {
     }
 
     impl_->holds.erase(hold_it);
+    if (impl_->wal != nullptr) {
+        impl_->wal->append_capture(hold_id, amount);
+    }
     return Result<void, LedgerError>::ok();
 }
 
@@ -157,11 +177,15 @@ Result<void, LedgerError> Ledger::reverse(HoldId hold_id) {
     }
 
     impl_->holds.erase(hold_it);
+    if (impl_->wal != nullptr) {
+        impl_->wal->append_reverse(hold_id);
+    }
     return Result<void, LedgerError>::ok();
 }
 
 std::size_t Ledger::expire_due(TimePoint now) {
     std::size_t expired_count = 0;
+    std::vector<HoldId> expired_ids;
 
     for (auto it = impl_->holds.begin(); it != impl_->holds.end();) {
         if (it->second.expires_at <= now) {
@@ -171,6 +195,7 @@ std::size_t Ledger::expire_due(TimePoint now) {
                 ++it;
                 continue;
             }
+            expired_ids.push_back(hold.id);
             it = impl_->holds.erase(it);
             ++expired_count;
         } else {
@@ -178,11 +203,19 @@ std::size_t Ledger::expire_due(TimePoint now) {
         }
     }
 
+    if (impl_->wal != nullptr && !expired_ids.empty()) {
+        impl_->wal->append_expire(now, expired_ids);
+    }
+
     return expired_count;
 }
 
 void Ledger::set_hold_ttl(std::chrono::seconds ttl) {
     impl_->hold_ttl = ttl;
+}
+
+void Ledger::set_wal(Wal* wal) {
+    impl_->wal = wal;
 }
 
 Result<Money, LedgerError> Ledger::balance(AccountId id, Bucket bucket) const {
