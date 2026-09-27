@@ -96,6 +96,10 @@ Result<Hold, LedgerError> Ledger::reserve(
         return Result<Hold, LedgerError>::err(LedgerError::CurrencyMismatch);
     }
 
+    if (amount.minor_units() <= 0) {
+        return Result<Hold, LedgerError>::err(LedgerError::InvalidAmount);
+    }
+
     const Money available = it->second.balance(Bucket::Available);
     if (available.minor_units() < amount.minor_units()) {
         return Result<Hold, LedgerError>::err(LedgerError::InsufficientFunds);

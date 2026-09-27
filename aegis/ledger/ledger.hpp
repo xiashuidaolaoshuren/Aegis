@@ -21,6 +21,7 @@ enum class LedgerError {
     AmountMismatch,
     UnknownHold,
     CurrencyMismatch,
+    InvalidAmount,
 };
 
 class Ledger {
@@ -39,7 +40,7 @@ public:
         AccountId cardholder,
         Money amount,
         MerchantId merchant,
-        TimePoint now = std::chrono::steady_clock::now());
+        TimePoint now = std::chrono::system_clock::now());
     [[nodiscard]] Result<void, LedgerError> capture(HoldId hold, Money amount);
     [[nodiscard]] Result<void, LedgerError> reverse(HoldId hold);
     [[nodiscard]] std::size_t expire_due(TimePoint now);

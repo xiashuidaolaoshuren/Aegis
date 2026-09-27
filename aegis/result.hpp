@@ -30,6 +30,11 @@ public:
         return value_.value();
     }
 
+    [[nodiscard]] T take() && {
+        has_value_ = false;
+        return std::move(value_.value());
+    }
+
     [[nodiscard]] const E& error() const {
         return error_.value();
     }

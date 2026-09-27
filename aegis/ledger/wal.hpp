@@ -156,8 +156,9 @@ public:
                 }
 
                 const Money amount{currency.value(), minor.value()};
-                const TimePoint expires_at{
-                    std::chrono::nanoseconds{expires_ns.value()}};
+                const TimePoint expires_at{std::chrono::system_clock::time_point{
+                    std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                        std::chrono::nanoseconds{expires_ns.value()})}};
 
                 const PostingBatch batch{
                     PostingLine{cardholder, Bucket::Available, amount, false},

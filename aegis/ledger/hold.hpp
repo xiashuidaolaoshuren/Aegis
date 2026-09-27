@@ -9,7 +9,7 @@
 
 namespace aegis::ledger {
 
-using TimePoint = std::chrono::steady_clock::time_point;
+using TimePoint = std::chrono::system_clock::time_point;
 
 struct HoldIdTag {};
 

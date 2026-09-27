@@ -651,12 +651,12 @@ TEST(LifecycleTest, DefaultReserveTimeAnchorsTtlToNow) {
 
     const auto reserve_result = ledger.reserve(cardholder_id, amount, merchant_id);
     ASSERT_TRUE(reserve_result.has_value());
-    EXPECT_EQ(ledger.expire_due(std::chrono::steady_clock::now()), 0U);
+    EXPECT_EQ(ledger.expire_due(std::chrono::system_clock::now()), 0U);
     EXPECT_EQ(ledger.live_hold_count(), 1U);
 
     std::this_thread::sleep_for(std::chrono::milliseconds{1100});
 
-    EXPECT_EQ(ledger.expire_due(std::chrono::steady_clock::now()), 1U);
+    EXPECT_EQ(ledger.expire_due(std::chrono::system_clock::now()), 1U);
     EXPECT_EQ(ledger.live_hold_count(), 0U);
 }
 
@@ -738,6 +738,77 @@ TEST(LifecycleTest, WalFlushFailureRetainsBufferUntilSuccessfulWrite) {
 
     std::filesystem::remove(wal_path);
     std::filesystem::remove_all(wal_dir);
+}
+
+TEST(LifecycleTest, ReserveRejectsNonPositiveAmount) {
+    Ledger ledger = make_ledger_from_tiny_genesis();
+    const auto genesis = load_genesis(tiny_genesis_records());
+    ASSERT_TRUE(genesis.has_value());
+    ShadowLedger shadow{genesis.value()};
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const MerchantId merchant_id{"m-1"};
+    const Money expected_available{Currency::Usd, 10000};
+    const Money expected_holds{Currency::Usd, 0};
+
+    for (const std::int64_t minor_units : {0, -1}) {
+        const Money amount{Currency::Usd, minor_units};
+
+        const auto result = ledger.reserve(cardholder_id, amount, merchant_id);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error(), LedgerError::InvalidAmount);
+
+        const auto shadow_result = shadow.reserve(cardholder_id, amount, merchant_id);
+        ASSERT_FALSE(shadow_result.has_value());
+        EXPECT_EQ(shadow_result.error(), LedgerError::InvalidAmount);
+
+        const auto available = ledger.balance(cardholder_id, Bucket::Available);
+        const auto holds = ledger.balance(cardholder_id, Bucket::Holds);
+        ASSERT_TRUE(available.has_value());
+        ASSERT_TRUE(holds.has_value());
+        EXPECT_EQ(available.value(), expected_available);
+        EXPECT_EQ(holds.value(), expected_holds);
+        EXPECT_EQ(ledger.live_hold_count(), 0U);
+    }
+}
+
+TEST(LifecycleTest, ReplaidExpiryRoundTripsSystemClockTimestamp) {
+    const auto genesis = load_genesis(tiny_genesis_records());
+    ASSERT_TRUE(genesis.has_value());
+
+    const auto wal_path =
+        std::filesystem::temp_directory_path() / "aegis_wal_expiry_roundtrip.wal";
+    std::filesystem::remove(wal_path);
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const Money amount{Currency::Usd, 5000};
+    const MerchantId merchant_id{"m-1"};
+    const TimePoint reserve_time = std::chrono::system_clock::now();
+    const auto expected_expiry = reserve_time + std::chrono::seconds{5};
+
+    {
+        Ledger ledger{genesis.value()};
+        Wal wal{wal_path};
+        ledger.set_wal(&wal);
+        ledger.set_hold_ttl(std::chrono::seconds{5});
+
+        const auto reserve_result =
+            ledger.reserve(cardholder_id, amount, merchant_id, reserve_time);
+        ASSERT_TRUE(reserve_result.has_value());
+        EXPECT_EQ(reserve_result.value().expires_at, expected_expiry);
+        ASSERT_TRUE(wal.flush().has_value());
+    }
+
+    auto replayed = Wal::replay(wal_path, genesis.value());
+    ASSERT_TRUE(replayed.has_value());
+    Ledger ledger = std::move(replayed).take();
+    EXPECT_EQ(ledger.live_hold_count(), 1U);
+
+    EXPECT_EQ(ledger.expire_due(expected_expiry - std::chrono::seconds{1}), 0U);
+    EXPECT_EQ(ledger.expire_due(expected_expiry), 1U);
+    EXPECT_EQ(ledger.live_hold_count(), 0U);
+
+    std::filesystem::remove(wal_path);
 }
 
 } // namespace
