@@ -7,10 +7,14 @@
 #include <aegis/ledger/hold.hpp>
 #include <aegis/ledger/idempotency.hpp>
 #include <aegis/ledger/ledger.hpp>
+#include <aegis/ledger/wal.hpp>
 #include <aegis/money.hpp>
+#include <shadow_model.hpp>
 
 #include <array>
 #include <chrono>
+#include <filesystem>
+#include <thread>
 
 namespace aegis::ledger {
 namespace {
@@ -635,6 +639,105 @@ TEST(LifecycleTest, AuthKeyLocatesHoldForCapture) {
     ASSERT_TRUE(interchange.has_value());
     EXPECT_EQ(payable.value(), expected_payable);
     EXPECT_EQ(interchange.value(), expected_interchange);
+}
+
+TEST(LifecycleTest, DefaultReserveTimeAnchorsTtlToNow) {
+    Ledger ledger = make_ledger_from_tiny_genesis();
+    ledger.set_hold_ttl(std::chrono::seconds{1});
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const Money amount{Currency::Usd, 5000};
+    const MerchantId merchant_id{"m-1"};
+
+    const auto reserve_result = ledger.reserve(cardholder_id, amount, merchant_id);
+    ASSERT_TRUE(reserve_result.has_value());
+    EXPECT_EQ(ledger.expire_due(std::chrono::steady_clock::now()), 0U);
+    EXPECT_EQ(ledger.live_hold_count(), 1U);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{1100});
+
+    EXPECT_EQ(ledger.expire_due(std::chrono::steady_clock::now()), 1U);
+    EXPECT_EQ(ledger.live_hold_count(), 0U);
+}
+
+TEST(LifecycleTest, ReserveRejectsCurrencyMismatch) {
+    Ledger ledger = make_ledger_from_tiny_genesis();
+    const auto genesis = load_genesis(tiny_genesis_records());
+    ASSERT_TRUE(genesis.has_value());
+    ShadowLedger shadow{genesis.value()};
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const Money amount{Currency::Eur, 5000};
+    const MerchantId merchant_id{"m-1"};
+
+    const auto result = ledger.reserve(cardholder_id, amount, merchant_id);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), LedgerError::CurrencyMismatch);
+
+    const auto shadow_result = shadow.reserve(cardholder_id, amount, merchant_id);
+    ASSERT_FALSE(shadow_result.has_value());
+    EXPECT_EQ(shadow_result.error(), LedgerError::CurrencyMismatch);
+
+    const Money expected_available{Currency::Usd, 10000};
+    const Money expected_holds{Currency::Usd, 0};
+    const auto available = ledger.balance(cardholder_id, Bucket::Available);
+    const auto holds = ledger.balance(cardholder_id, Bucket::Holds);
+
+    ASSERT_TRUE(available.has_value());
+    ASSERT_TRUE(holds.has_value());
+    EXPECT_EQ(available.value(), expected_available);
+    EXPECT_EQ(holds.value(), expected_holds);
+    EXPECT_EQ(ledger.live_hold_count(), 0U);
+}
+
+TEST(LifecycleTest, WalFlushFailureRetainsBufferUntilSuccessfulWrite) {
+    const auto genesis = load_genesis(tiny_genesis_records());
+    ASSERT_TRUE(genesis.has_value());
+
+    const auto wal_dir =
+        std::filesystem::temp_directory_path() / "aegis_wal_flush_fail_dir";
+    const auto wal_path =
+        std::filesystem::temp_directory_path() / "aegis_wal_flush_fail.wal";
+    std::filesystem::remove_all(wal_dir);
+    std::filesystem::remove(wal_path);
+    std::filesystem::create_directory(wal_dir);
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const Money amount{Currency::Usd, 5000};
+    const MerchantId merchant_id{"m-1"};
+
+    {
+        Ledger ledger{genesis.value()};
+        Wal wal{wal_dir};
+        ledger.set_wal(&wal);
+
+        const auto reserve_result = ledger.reserve(cardholder_id, amount, merchant_id);
+        ASSERT_TRUE(reserve_result.has_value());
+
+        const auto failed_flush = wal.flush();
+        ASSERT_FALSE(failed_flush.has_value());
+        EXPECT_EQ(failed_flush.error(), WalError::IoFailure);
+
+        wal.set_path(wal_path);
+        ASSERT_TRUE(wal.flush().has_value());
+    }
+
+    const auto replayed = Wal::replay(wal_path, genesis.value());
+    ASSERT_TRUE(replayed.has_value());
+    const Ledger& ledger = replayed.value();
+
+    const Money expected_available{Currency::Usd, 5000};
+    const Money expected_holds{Currency::Usd, 5000};
+    const auto available = ledger.balance(cardholder_id, Bucket::Available);
+    const auto holds = ledger.balance(cardholder_id, Bucket::Holds);
+    ASSERT_TRUE(available.has_value());
+    ASSERT_TRUE(holds.has_value());
+    EXPECT_EQ(available.value(), expected_available);
+    EXPECT_EQ(holds.value(), expected_holds);
+    EXPECT_EQ(ledger.live_hold_count(), 1U);
+
+    std::filesystem::remove(wal_path);
+    std::filesystem::remove_all(wal_dir);
 }
 
 } // namespace

@@ -77,17 +77,25 @@ public:
         buffer_.push_back('\n');
     }
 
-    void flush() {
+    void set_path(std::filesystem::path path) {
+        path_ = std::move(path);
+    }
+
+    [[nodiscard]] Result<void, WalError> flush() {
         if (buffer_.empty()) {
-            return;
+            return Result<void, WalError>::ok();
         }
 
         std::ofstream out(path_, std::ios::app | std::ios::binary);
         if (!out) {
-            return;
+            return Result<void, WalError>::err(WalError::IoFailure);
         }
         out.write(buffer_.data(), static_cast<std::streamsize>(buffer_.size()));
+        if (!out) {
+            return Result<void, WalError>::err(WalError::IoFailure);
+        }
         buffer_.clear();
+        return Result<void, WalError>::ok();
     }
 
     static Result<Ledger, WalError> replay(

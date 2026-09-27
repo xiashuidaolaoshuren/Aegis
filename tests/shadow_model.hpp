@@ -42,10 +42,14 @@ public:
         AccountId cardholder,
         Money amount,
         MerchantId merchant,
-        TimePoint now = TimePoint{}) {
+        TimePoint now = std::chrono::steady_clock::now()) {
         const auto it = wallets_.find(cardholder);
         if (it == wallets_.end()) {
             return Result<Hold, LedgerError>::err(LedgerError::UnknownWallet);
+        }
+
+        if (amount.currency() != it->second.currency) {
+            return Result<Hold, LedgerError>::err(LedgerError::CurrencyMismatch);
         }
 
         if (it->second.available < amount.minor_units()) {

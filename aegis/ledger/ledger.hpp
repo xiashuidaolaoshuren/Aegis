@@ -15,7 +15,13 @@ namespace aegis::ledger {
 class Wallet;
 class Wal;
 
-enum class LedgerError { InsufficientFunds, UnknownWallet, AmountMismatch, UnknownHold };
+enum class LedgerError {
+    InsufficientFunds,
+    UnknownWallet,
+    AmountMismatch,
+    UnknownHold,
+    CurrencyMismatch,
+};
 
 class Ledger {
     friend class Wal;
@@ -33,7 +39,7 @@ public:
         AccountId cardholder,
         Money amount,
         MerchantId merchant,
-        TimePoint now = TimePoint{});
+        TimePoint now = std::chrono::steady_clock::now());
     [[nodiscard]] Result<void, LedgerError> capture(HoldId hold, Money amount);
     [[nodiscard]] Result<void, LedgerError> reverse(HoldId hold);
     [[nodiscard]] std::size_t expire_due(TimePoint now);

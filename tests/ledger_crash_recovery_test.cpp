@@ -159,7 +159,7 @@ TEST(CrashRecoveryTest, FlushedReserveReplayRestoresState) {
         const auto result = ledger.reserve(cardholder_id, amount, merchant_id);
         ASSERT_TRUE(result.has_value());
         expected_hold_id = result.value().id;
-        wal.flush();
+        ASSERT_TRUE(wal.flush().has_value());
     }
 
     const auto replayed = Wal::replay(wal_path, genesis);
@@ -198,26 +198,26 @@ TEST(CrashRecoveryTest, FullLifecycleReplayMatchesShadow) {
 
         const auto reserve = ledger.reserve(cardholder_id, amount, merchant_id, now);
         ASSERT_TRUE(reserve.has_value());
-        wal.flush();
+        ASSERT_TRUE(wal.flush().has_value());
 
         const HoldId hold_id = reserve.value().id;
         ASSERT_TRUE(ledger.capture(hold_id, amount).has_value());
-        wal.flush();
+        ASSERT_TRUE(wal.flush().has_value());
 
         const auto reserve2 = ledger.reserve(cardholder_id, amount, merchant_id, now);
         ASSERT_TRUE(reserve2.has_value());
-        wal.flush();
+        ASSERT_TRUE(wal.flush().has_value());
 
         const HoldId hold2 = reserve2.value().id;
         ASSERT_TRUE(ledger.reverse(hold2).has_value());
-        wal.flush();
+        ASSERT_TRUE(wal.flush().has_value());
 
         ASSERT_TRUE(ledger.reserve(cardholder_id, amount, merchant_id, now).has_value());
-        wal.flush();
+        ASSERT_TRUE(wal.flush().has_value());
 
         const TimePoint at_expiry = now + std::chrono::seconds{5};
         EXPECT_EQ(ledger.expire_due(at_expiry), 1U);
-        wal.flush();
+        ASSERT_TRUE(wal.flush().has_value());
     }
 
     ShadowLedger shadow{genesis};
@@ -257,7 +257,7 @@ TEST(CrashRecoveryTest, UnflushedReserveAbsentAfterReplay) {
         ledger.set_wal(&wal);
 
         ASSERT_TRUE(ledger.reserve(cardholder_id, amount, merchant_id).has_value());
-        wal.flush();
+        ASSERT_TRUE(wal.flush().has_value());
 
         ASSERT_TRUE(ledger.reserve(cardholder_id, amount, merchant_id).has_value());
     }
@@ -287,10 +287,10 @@ TEST(CrashRecoveryTest, TornLastLineDropped) {
         ledger.set_wal(&wal);
 
         ASSERT_TRUE(ledger.reserve(cardholder_id, amount, merchant_id).has_value());
-        wal.flush();
+        ASSERT_TRUE(wal.flush().has_value());
 
         ASSERT_TRUE(ledger.reserve(cardholder_id, amount, merchant_id).has_value());
-        wal.flush();
+        ASSERT_TRUE(wal.flush().has_value());
     }
 
     {
