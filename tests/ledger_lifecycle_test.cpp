@@ -11,9 +11,12 @@
 #include <aegis/money.hpp>
 #include <shadow_model.hpp>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <thread>
 
 namespace aegis::ledger {
@@ -809,6 +812,156 @@ TEST(LifecycleTest, ReplaidExpiryRoundTripsSystemClockTimestamp) {
     EXPECT_EQ(ledger.live_hold_count(), 0U);
 
     std::filesystem::remove(wal_path);
+}
+
+TEST(LifecycleTest, CaptureRejectsCrossCurrencyMerchant) {
+    const std::array<GenesisRecord, 3> records{{
+        GenesisRecord{
+            WalletKind::Cardholder,
+            AccountId{"4242424242424242"},
+            Currency::Usd,
+            10000,
+        },
+        GenesisRecord{
+            WalletKind::Merchant,
+            AccountId{"m-eur"},
+            Currency::Eur,
+            0,
+        },
+        GenesisRecord{
+            WalletKind::System,
+            AccountId{"system"},
+            Currency::Eur,
+            0,
+        },
+    }};
+    const auto genesis = load_genesis(records);
+    ASSERT_TRUE(genesis.has_value());
+
+    Ledger ledger{genesis.value()};
+    ShadowLedger shadow{genesis.value()};
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const AccountId merchant_id{"m-eur"};
+    const Money amount{Currency::Usd, 5000};
+    const MerchantId merchant{merchant_id.value()};
+
+    const auto reserve_result = ledger.reserve(cardholder_id, amount, merchant);
+    ASSERT_TRUE(reserve_result.has_value());
+    const HoldId hold_id = reserve_result.value().id;
+
+    const auto shadow_reserve = shadow.reserve(cardholder_id, amount, merchant);
+    ASSERT_TRUE(shadow_reserve.has_value());
+
+    const auto capture_result = ledger.capture(hold_id, amount);
+    ASSERT_FALSE(capture_result.has_value());
+    EXPECT_EQ(capture_result.error(), LedgerError::CurrencyMismatch);
+
+    const auto shadow_capture = shadow.capture(hold_id, amount);
+    ASSERT_FALSE(shadow_capture.has_value());
+    EXPECT_EQ(shadow_capture.error(), LedgerError::CurrencyMismatch);
+
+    const Money expected_available{Currency::Usd, 5000};
+    const Money expected_holds{Currency::Usd, 5000};
+    const auto available = ledger.balance(cardholder_id, Bucket::Available);
+    const auto holds = ledger.balance(cardholder_id, Bucket::Holds);
+    ASSERT_TRUE(available.has_value());
+    ASSERT_TRUE(holds.has_value());
+    EXPECT_EQ(available.value(), expected_available);
+    EXPECT_EQ(holds.value(), expected_holds);
+    EXPECT_EQ(ledger.live_hold_count(), 1U);
+}
+
+TEST(LifecycleTest, WalFlushRetryDoesNotDuplicateRecords) {
+    const auto genesis = load_genesis(tiny_genesis_records());
+    ASSERT_TRUE(genesis.has_value());
+
+    const auto wal_dir =
+        std::filesystem::temp_directory_path() / "aegis_wal_retry_no_dup_dir";
+    const auto wal_path =
+        std::filesystem::temp_directory_path() / "aegis_wal_retry_no_dup.wal";
+    std::filesystem::remove_all(wal_dir);
+    std::filesystem::remove(wal_path);
+    std::filesystem::create_directory(wal_dir);
+
+    const AccountId cardholder_id{"4242424242424242"};
+    const AccountId merchant_id{"m-1"};
+    const AccountId system_id{"system"};
+    const Money amount{Currency::Usd, 5000};
+    const MerchantId merchant{merchant_id.value()};
+
+    {
+        Ledger ledger{genesis.value()};
+        Wal wal{wal_dir};
+        ledger.set_wal(&wal);
+
+        const auto reserve_result = ledger.reserve(cardholder_id, amount, merchant);
+        ASSERT_TRUE(reserve_result.has_value());
+        const HoldId hold_id = reserve_result.value().id;
+
+        const auto failed_flush = wal.flush();
+        ASSERT_FALSE(failed_flush.has_value());
+        EXPECT_EQ(failed_flush.error(), WalError::IoFailure);
+
+        const auto capture_result = ledger.capture(hold_id, amount);
+        ASSERT_TRUE(capture_result.has_value());
+
+        wal.set_path(wal_path);
+        ASSERT_TRUE(wal.flush().has_value());
+    }
+
+    ShadowLedger shadow{genesis.value()};
+    const auto shadow_reserve = shadow.reserve(cardholder_id, amount, merchant);
+    ASSERT_TRUE(shadow_reserve.has_value());
+    ASSERT_TRUE(shadow.capture(shadow_reserve.value().id, amount).has_value());
+
+    const auto replayed = Wal::replay(wal_path, genesis.value());
+    ASSERT_TRUE(replayed.has_value());
+
+    const Ledger& ledger = replayed.value();
+    const Money expected_available{Currency::Usd, 5000};
+    const Money expected_holds{Currency::Usd, 0};
+    const Money expected_payable{Currency::Usd, 4855};
+    const Money expected_interchange{Currency::Usd, 145};
+
+    const auto available = ledger.balance(cardholder_id, Bucket::Available);
+    const auto holds = ledger.balance(cardholder_id, Bucket::Holds);
+    const auto payable = ledger.balance(merchant_id, Bucket::Payable);
+    const auto interchange = ledger.balance(system_id, Bucket::Interchange);
+    ASSERT_TRUE(available.has_value());
+    ASSERT_TRUE(holds.has_value());
+    ASSERT_TRUE(payable.has_value());
+    ASSERT_TRUE(interchange.has_value());
+    EXPECT_EQ(available.value(), expected_available);
+    EXPECT_EQ(holds.value(), expected_holds);
+    EXPECT_EQ(payable.value(), expected_payable);
+    EXPECT_EQ(interchange.value(), expected_interchange);
+    EXPECT_EQ(ledger.live_hold_count(), 0U);
+
+    const auto shadow_available = shadow.balance(cardholder_id, Bucket::Available);
+    const auto shadow_holds = shadow.balance(cardholder_id, Bucket::Holds);
+    const auto shadow_payable = shadow.balance(merchant_id, Bucket::Payable);
+    const auto shadow_interchange = shadow.balance(system_id, Bucket::Interchange);
+    ASSERT_TRUE(shadow_available.has_value());
+    ASSERT_TRUE(shadow_holds.has_value());
+    ASSERT_TRUE(shadow_payable.has_value());
+    ASSERT_TRUE(shadow_interchange.has_value());
+    EXPECT_EQ(available.value(), shadow_available.value());
+    EXPECT_EQ(holds.value(), shadow_holds.value());
+    EXPECT_EQ(payable.value(), shadow_payable.value());
+    EXPECT_EQ(interchange.value(), shadow_interchange.value());
+
+    {
+        std::ifstream wal_file(wal_path, std::ios::binary);
+        ASSERT_TRUE(wal_file);
+        const std::string wal_content(
+            (std::istreambuf_iterator<char>(wal_file)),
+            std::istreambuf_iterator<char>());
+        EXPECT_EQ(std::count(wal_content.begin(), wal_content.end(), '\n'), 2U);
+    }
+
+    std::filesystem::remove(wal_path);
+    std::filesystem::remove_all(wal_dir);
 }
 
 } // namespace

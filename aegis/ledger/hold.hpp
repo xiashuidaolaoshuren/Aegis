@@ -9,6 +9,7 @@
 
 namespace aegis::ledger {
 
+// Wall clock so hold expiry survives process restarts; may shift with NTP adjustments.
 using TimePoint = std::chrono::system_clock::time_point;
 
 struct HoldIdTag {};

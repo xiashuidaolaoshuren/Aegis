@@ -90,11 +90,17 @@ public:
         if (merchant_it == wallets_.end()) {
             return Result<void, LedgerError>::err(LedgerError::UnknownWallet);
         }
+        if (merchant_it->second.currency != hold.amount.currency()) {
+            return Result<void, LedgerError>::err(LedgerError::CurrencyMismatch);
+        }
 
         if (!system_account_.has_value()) {
             return Result<void, LedgerError>::err(LedgerError::UnknownWallet);
         }
         const AccountId system_account = system_account_.value();
+        if (wallets_.at(system_account).currency != hold.amount.currency()) {
+            return Result<void, LedgerError>::err(LedgerError::CurrencyMismatch);
+        }
 
         const CaptureSplit split = split_capture(amount);
         auto& cardholder_wallet = wallets_.at(hold.cardholder);

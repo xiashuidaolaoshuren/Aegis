@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <optional>
 #include <utility>
 
@@ -31,6 +32,7 @@ public:
     }
 
     [[nodiscard]] T take() && {
+        assert(has_value_);
         has_value_ = false;
         return std::move(value_.value());
     }

@@ -310,5 +310,65 @@ TEST(CrashRecoveryTest, TornLastLineDropped) {
     std::filesystem::remove(wal_path);
 }
 
+TEST(CrashRecoveryTest, ReplayRejectsInvalidReserveAmount) {
+    const auto genesis = load_tiny_genesis_wallets();
+    const auto wal_path = make_temp_wal_path("invalid_reserve_amount");
+    std::filesystem::remove(wal_path);
+
+    {
+        std::ofstream out(wal_path, std::ios::binary);
+        ASSERT_TRUE(out);
+        out << "R|1|4242424242424242|m-1|-5000|Usd|0\n";
+    }
+
+    const auto replayed = Wal::replay(wal_path, genesis);
+    ASSERT_FALSE(replayed.has_value());
+    EXPECT_EQ(replayed.error(), WalError::CorruptRecord);
+
+    std::filesystem::remove(wal_path);
+}
+
+TEST(CrashRecoveryTest, ReplayRejectsCrossCurrencyCapture) {
+    const std::array<GenesisRecord, 3> records{{
+        GenesisRecord{
+            WalletKind::Cardholder,
+            AccountId{"4242424242424242"},
+            Currency::Usd,
+            10000,
+        },
+        GenesisRecord{
+            WalletKind::Merchant,
+            AccountId{"m-eur"},
+            Currency::Eur,
+            0,
+        },
+        GenesisRecord{
+            WalletKind::System,
+            AccountId{"system"},
+            Currency::Eur,
+            0,
+        },
+    }};
+    const auto genesis_result = load_genesis(records);
+    ASSERT_TRUE(genesis_result.has_value());
+    const auto genesis = genesis_result.value();
+
+    const auto wal_path = make_temp_wal_path("cross_currency_capture");
+    std::filesystem::remove(wal_path);
+
+    {
+        std::ofstream out(wal_path, std::ios::binary);
+        ASSERT_TRUE(out);
+        out << "R|1|4242424242424242|m-eur|5000|Usd|0\n";
+        out << "C|1|5000\n";
+    }
+
+    const auto replayed = Wal::replay(wal_path, genesis);
+    ASSERT_FALSE(replayed.has_value());
+    EXPECT_EQ(replayed.error(), WalError::CorruptRecord);
+
+    std::filesystem::remove(wal_path);
+}
+
 } // namespace
 } // namespace aegis::ledger

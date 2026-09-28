@@ -8,6 +8,7 @@
 #include <aegis/result.hpp>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -17,6 +18,12 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace aegis::ledger {
 
@@ -86,15 +93,46 @@ public:
             return Result<void, WalError>::ok();
         }
 
-        std::ofstream out(path_, std::ios::app | std::ios::binary);
-        if (!out) {
+        const std::size_t remaining = buffer_.size() - written_;
+
+        FILE* file = std::fopen(path_.string().c_str(), "ab");
+        if (file == nullptr) {
             return Result<void, WalError>::err(WalError::IoFailure);
         }
-        out.write(buffer_.data(), static_cast<std::streamsize>(buffer_.size()));
-        if (!out) {
+
+        if (remaining > 0) {
+            const char* data = buffer_.data() + written_;
+            const std::size_t wrote = std::fwrite(data, 1, remaining, file);
+            written_ += wrote;
+            if (wrote != remaining) {
+                std::fclose(file);
+                return Result<void, WalError>::err(WalError::IoFailure);
+            }
+        }
+
+        if (std::fflush(file) != 0) {
+            std::fclose(file);
             return Result<void, WalError>::err(WalError::IoFailure);
         }
+
+#ifdef _WIN32
+        if (_commit(_fileno(file)) != 0) {
+            std::fclose(file);
+            return Result<void, WalError>::err(WalError::IoFailure);
+        }
+#else
+        if (fsync(fileno(file)) != 0) {
+            std::fclose(file);
+            return Result<void, WalError>::err(WalError::IoFailure);
+        }
+#endif
+
+        if (std::fclose(file) != 0) {
+            return Result<void, WalError>::err(WalError::IoFailure);
+        }
+
         buffer_.clear();
+        written_ = 0;
         return Result<void, WalError>::ok();
     }
 
@@ -155,6 +193,18 @@ public:
                     return Result<Ledger, WalError>::err(WalError::CorruptRecord);
                 }
 
+                if (minor.value() <= 0) {
+                    return Result<Ledger, WalError>::err(WalError::CorruptRecord);
+                }
+
+                const auto cardholder_it = wallets.find(cardholder);
+                if (cardholder_it == wallets.end()) {
+                    return Result<Ledger, WalError>::err(WalError::CorruptRecord);
+                }
+                if (cardholder_it->second.currency() != currency.value()) {
+                    return Result<Ledger, WalError>::err(WalError::CorruptRecord);
+                }
+
                 const Money amount{currency.value(), minor.value()};
                 const TimePoint expires_at{std::chrono::system_clock::time_point{
                     std::chrono::duration_cast<std::chrono::system_clock::duration>(
@@ -201,8 +251,24 @@ public:
                 }
 
                 const AccountId merchant_account{hold.merchant.value()};
+                const auto merchant_it = wallets.find(merchant_account);
+                if (merchant_it == wallets.end()) {
+                    return Result<Ledger, WalError>::err(WalError::CorruptRecord);
+                }
+                if (merchant_it->second.currency() != hold.amount.currency()) {
+                    return Result<Ledger, WalError>::err(WalError::CorruptRecord);
+                }
+
                 const auto system_account = find_system_account(wallets);
                 if (!system_account.has_value()) {
+                    return Result<Ledger, WalError>::err(WalError::CorruptRecord);
+                }
+
+                const auto system_it = wallets.find(system_account.value());
+                if (system_it == wallets.end()) {
+                    return Result<Ledger, WalError>::err(WalError::CorruptRecord);
+                }
+                if (system_it->second.currency() != hold.amount.currency()) {
                     return Result<Ledger, WalError>::err(WalError::CorruptRecord);
                 }
 
@@ -368,6 +434,7 @@ private:
 
     std::filesystem::path path_;
     std::string buffer_;
+    std::size_t written_{0};
 };
 
 } // namespace aegis::ledger

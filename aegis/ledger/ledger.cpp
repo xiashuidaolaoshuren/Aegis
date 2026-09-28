@@ -143,13 +143,25 @@ Result<void, LedgerError> Ledger::capture(HoldId hold_id, Money amount) {
 
     const AccountId merchant_account{hold.merchant.value()};
 
-    if (impl_->wallets.find(merchant_account) == impl_->wallets.end()) {
+    const auto merchant_it = impl_->wallets.find(merchant_account);
+    if (merchant_it == impl_->wallets.end()) {
         return Result<void, LedgerError>::err(LedgerError::UnknownWallet);
+    }
+    if (merchant_it->second.currency() != hold.amount.currency()) {
+        return Result<void, LedgerError>::err(LedgerError::CurrencyMismatch);
     }
 
     const auto system_account = find_system_account(impl_->wallets);
     if (!system_account.has_value()) {
         return Result<void, LedgerError>::err(system_account.error());
+    }
+
+    const auto system_it = impl_->wallets.find(system_account.value());
+    if (system_it == impl_->wallets.end()) {
+        return Result<void, LedgerError>::err(LedgerError::UnknownWallet);
+    }
+    if (system_it->second.currency() != hold.amount.currency()) {
+        return Result<void, LedgerError>::err(LedgerError::CurrencyMismatch);
     }
 
     const CaptureSplit split = split_capture(amount);
