@@ -35,6 +35,10 @@ public:
             Money{lhs.currency_, lhs.minor_units_ + rhs.minor_units_});
     }
 
+    friend Money operator-(Money money) {
+        return Money{money.currency_, -money.minor_units_};
+    }
+
 private:
     Currency currency_;
     std::int64_t minor_units_;

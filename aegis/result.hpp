@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <optional>
 #include <utility>
 
@@ -30,6 +31,12 @@ public:
         return value_.value();
     }
 
+    [[nodiscard]] T take() && {
+        assert(has_value_);
+        has_value_ = false;
+        return std::move(value_.value());
+    }
+
     [[nodiscard]] const E& error() const {
         return error_.value();
     }
@@ -48,6 +55,45 @@ Result<T, E> ok(T value) {
 template <typename T, typename E>
 Result<T, E> err(E error) {
     return Result<T, E>::err(std::move(error));
+}
+
+template <typename E>
+class Result<void, E> {
+public:
+    static Result ok() {
+        Result result;
+        result.has_value_ = true;
+        return result;
+    }
+
+    static Result err(E error) {
+        Result result;
+        result.has_value_ = false;
+        result.error_.emplace(std::move(error));
+        return result;
+    }
+
+    [[nodiscard]] bool has_value() const {
+        return has_value_;
+    }
+
+    [[nodiscard]] const E& error() const {
+        return error_.value();
+    }
+
+private:
+    bool has_value_{false};
+    std::optional<E> error_;
+};
+
+template <typename E>
+Result<void, E> ok() {
+    return Result<void, E>::ok();
+}
+
+template <typename E>
+Result<void, E> err(E error) {
+    return Result<void, E>::err(std::move(error));
 }
 
 } // namespace aegis

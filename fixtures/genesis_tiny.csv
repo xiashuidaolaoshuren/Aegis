@@ -1,0 +1,4 @@
+# kind,id,currency,available_minor
+cardholder,4242424242424242,Usd,10000
+merchant,m-1,Usd,0
+system,system,Usd,0
