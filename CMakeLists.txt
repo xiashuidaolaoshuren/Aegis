@@ -12,6 +12,7 @@ endif()
 add_subdirectory(aegis)
 enable_testing()
 add_subdirectory(tests)
+add_subdirectory(apps)
 
 option(AEGIS_BUILD_FUZZER "Build libFuzzer harness" OFF)
 add_subdirectory(fuzz)

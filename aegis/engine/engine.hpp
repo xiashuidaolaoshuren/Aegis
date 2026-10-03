@@ -81,6 +81,7 @@ enum class EngineError {
 
 struct EngineConfig {
     std::filesystem::path genesis_path;
+    std::uint16_t listen_port = 0;
     std::size_t io_threads = 1;
     std::size_t worker_count = 4;
     std::size_t inbound_capacity = 64;
@@ -116,7 +117,7 @@ public:
         connection_queue_ = std::make_unique<concurrent::BoundedQueue<net::Connection>>(
             config_.connection_queue_capacity);
 
-        if (!listener_.bind_loopback(0).has_value()) {
+        if (!listener_.bind_loopback(config_.listen_port).has_value()) {
             return Result<void, EngineError>::err(EngineError::BindFailed);
         }
         port_ = listener_.port();

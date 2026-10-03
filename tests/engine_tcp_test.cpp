@@ -7,7 +7,10 @@
 #include <aegis/net/socket.hpp>
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
+#include <string>
+#include <string_view>
 
 namespace aegis::engine {
 namespace {
@@ -16,16 +19,20 @@ using iso8583::FieldId;
 using iso8583::Message;
 using iso8583::Mti;
 
-[[nodiscard]] Message make_valid_auth_request() {
+[[nodiscard]] Message make_auth_request_for_stan(std::string_view stan) {
     Message request{Mti::AuthorizationRequest};
     (void)request.set(FieldId::Pan, "4242424242424242");
     (void)request.set(FieldId::Amount, "000000005000");
     (void)request.set(FieldId::TransmissionDateTime, "1002153045");
-    (void)request.set(FieldId::Stan, "000001");
+    (void)request.set(FieldId::Stan, std::string{stan});
     (void)request.set(FieldId::TerminalId, "TERM0001");
     (void)request.set(FieldId::MerchantId, "m-1          ");
     (void)request.set(FieldId::Currency, "840");
     return request;
+}
+
+[[nodiscard]] Message make_valid_auth_request() {
+    return make_auth_request_for_stan("000001");
 }
 
 [[nodiscard]] EngineConfig make_default_config() {
@@ -117,6 +124,29 @@ TEST(EngineTcpTest, FullInboundQueueReturnsSystemMalfunction) {
     net::Connection third;
     ASSERT_TRUE(third.connect_loopback(engine.port()).has_value());
     EXPECT_EQ(send_auth_and_read_code(third, request), "96");
+
+    engine.stop();
+}
+
+[[nodiscard]] std::uint16_t free_loopback_port() {
+    net::Listener probe;
+    EXPECT_TRUE(probe.bind_loopback(0).has_value());
+    return probe.port();
+}
+
+TEST(EngineTcpTest, ConfiguredListenPortBindsThatPort) {
+    const std::uint16_t port = free_loopback_port();
+
+    EngineConfig config = make_default_config();
+    config.listen_port = port;
+
+    Engine engine;
+    ASSERT_TRUE(engine.start(config).has_value());
+    EXPECT_EQ(engine.port(), port);
+
+    net::Connection client;
+    ASSERT_TRUE(client.connect_loopback(port).has_value());
+    EXPECT_EQ(send_auth_and_read_code(client, make_auth_request_for_stan("000002")), "00");
 
     engine.stop();
 }
