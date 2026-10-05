@@ -167,5 +167,71 @@ TEST(FramingTest, ShortHeaderBeforePeerCloseReturnsTruncated) {
     EXPECT_EQ(read.error(), FrameError::Truncated);
 }
 
+TEST(FramingTest, TimedAcceptReturnsNothingWhenNoPeerConnects) {
+    Listener listener;
+    ASSERT_TRUE(listener.bind_loopback(0).has_value());
+
+    const auto started = std::chrono::steady_clock::now();
+    auto accepted = listener.accept(std::chrono::milliseconds{100});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    ASSERT_TRUE(accepted.has_value());
+    EXPECT_FALSE(accepted.value().has_value());
+    EXPECT_LT(elapsed, std::chrono::seconds{2});
+}
+
+TEST(FramingTest, TimedAcceptReturnsPendingConnectionAndKeepsAccepting) {
+    Listener listener;
+    ASSERT_TRUE(listener.bind_loopback(0).has_value());
+
+    Connection client;
+    ASSERT_TRUE(client.connect_loopback(listener.port()).has_value());
+
+    auto first = listener.accept(std::chrono::milliseconds{1000});
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(first.value().has_value());
+    std::optional<Connection> pending = std::move(first).take();
+    Connection server = std::move(pending.value());
+
+    const std::vector<std::byte> payload{std::byte{0x01}, std::byte{0x02}};
+    ASSERT_TRUE(write_frame(client, payload).has_value());
+    client.set_receive_timeout(std::chrono::milliseconds{500});
+    const auto read = read_frame(server);
+    ASSERT_TRUE(read.has_value());
+    EXPECT_EQ(read.value(), payload);
+
+    // The listener must still be usable (and blocking again) after a timed accept.
+    auto idle = listener.accept(std::chrono::milliseconds{100});
+    ASSERT_TRUE(idle.has_value());
+    EXPECT_FALSE(idle.value().has_value());
+}
+
+TEST(FramingTest, TimedAcceptReturnsBlockingConnectionThatHonoursReceiveTimeout) {
+    Listener listener;
+    ASSERT_TRUE(listener.bind_loopback(0).has_value());
+
+    Connection client;
+    ASSERT_TRUE(client.connect_loopback(listener.port()).has_value());
+
+    auto accepted = listener.accept(std::chrono::milliseconds{1000});
+    ASSERT_TRUE(accepted.has_value());
+    ASSERT_TRUE(accepted.value().has_value());
+    std::optional<Connection> pending = std::move(accepted).take();
+    Connection server = std::move(pending.value());
+
+    // The client stays silent, so the read must wait for the whole receive timeout. A socket left
+    // in non-blocking mode would fail immediately with a would-block error instead.
+    server.set_receive_timeout(std::chrono::milliseconds{200});
+
+    std::array<std::byte, 8> buffer{};
+    const auto started = std::chrono::steady_clock::now();
+    const auto read = server.read_some(std::span<std::byte>(buffer));
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    ASSERT_FALSE(read.has_value());
+    EXPECT_EQ(read.error(), SocketError::Timeout);
+    EXPECT_GE(elapsed, std::chrono::milliseconds{150});
+}
+
 } // namespace
 } // namespace aegis::net

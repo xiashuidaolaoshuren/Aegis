@@ -14,6 +14,7 @@
 #include <aegis/net/socket.hpp>
 #include <aegis/result.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -86,6 +87,8 @@ struct EngineConfig {
     std::size_t worker_count = 4;
     std::size_t inbound_capacity = 64;
     std::size_t connection_queue_capacity = 64;
+    std::chrono::milliseconds frame_read_timeout{5000};
+    std::chrono::milliseconds response_write_timeout{5000};
 };
 
 class Engine {
@@ -151,8 +154,6 @@ public:
             }
         }
 
-        listener_ = net::Listener{};
-
         if (pool_) {
             pool_->shutdown();
         }
@@ -166,6 +167,11 @@ public:
             }
         }
         io_threads_.clear();
+
+        // Every thread that could touch the listener has been joined, so replacing it here is
+        // ordered after any in-flight accept() and cannot race.
+        listener_ = net::Listener{};
+
         pool_.reset();
         connection_queue_.reset();
         authorizer_.reset();
@@ -187,12 +193,25 @@ public:
     }
 
 private:
+    // The acceptor polls with a bounded wait so it notices a stop request without relying on the
+    // listening socket being closed from another thread.
+    static constexpr auto kAcceptPollInterval = std::chrono::milliseconds{100};
+    static constexpr auto kAcceptErrorBackoff = std::chrono::milliseconds{10};
+
     void acceptor_loop(std::stop_token stop) {
         while (!stop.stop_requested()) {
-            net::Connection connection = listener_.accept();
-            if (!connection.is_open()) {
+            auto polled = listener_.accept(kAcceptPollInterval);
+            if (!polled.has_value()) {
+                // The listening socket is unusable; back off so a persistent error does not spin.
+                std::this_thread::sleep_for(kAcceptErrorBackoff);
                 continue;
             }
+            if (!polled.value().has_value()) {
+                continue; // the poll timed out; re-check the stop token
+            }
+
+            std::optional<net::Connection> pending = std::move(polled).take();
+            net::Connection connection = std::move(pending.value());
             if (!connection_queue_->push(std::move(connection))) {
                 connection.close();
             }
@@ -210,6 +229,17 @@ private:
             }
 
             auto conn = std::make_shared<net::Connection>(std::move(connection.value()));
+
+            if (stop.stop_requested()) {
+                // Shutdown is in progress: do not start a read that would only have to time out.
+                conn->close();
+                continue;
+            }
+
+            // Bounds both the frame read on this thread and the response write on the worker that
+            // picks the request up, so shutdown cannot block on a silent or stalled peer.
+            conn->set_receive_timeout(config_.frame_read_timeout);
+            conn->set_send_timeout(config_.response_write_timeout);
 
             const auto frame = net::read_frame(*conn);
             if (!frame.has_value()) {

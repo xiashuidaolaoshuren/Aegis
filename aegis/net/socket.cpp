@@ -17,6 +17,7 @@ constexpr native_socket_t kInvalidSocket = INVALID_SOCKET;
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 using native_socket_t = int;
@@ -87,6 +88,57 @@ void close_socket(native_socket_t socket) {
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
     return setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0;
+#endif
+}
+
+[[nodiscard]] bool set_send_timeout_ms(native_socket_t socket, int timeout_ms) {
+#ifdef _WIN32
+    const DWORD value = static_cast<DWORD>(timeout_ms);
+    return setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&value),
+                      sizeof(value)) == 0;
+#else
+    timeval tv{};
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    return setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0;
+#endif
+}
+
+[[nodiscard]] bool set_blocking(native_socket_t socket, bool blocking) {
+#ifdef _WIN32
+    u_long mode = blocking ? 0UL : 1UL;
+    return ioctlsocket(socket, FIONBIO, &mode) == 0;
+#else
+    const int flags = ::fcntl(socket, F_GETFL, 0);
+    if (flags < 0) {
+        return false;
+    }
+    const int updated = blocking ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK);
+    return ::fcntl(socket, F_SETFL, updated) == 0;
+#endif
+}
+
+[[nodiscard]] int last_socket_error() {
+#ifdef _WIN32
+    return WSAGetLastError();
+#else
+    return errno;
+#endif
+}
+
+[[nodiscard]] bool is_would_block(int error) {
+#ifdef _WIN32
+    return error == WSAEWOULDBLOCK;
+#else
+    return error == EAGAIN || error == EWOULDBLOCK;
+#endif
+}
+
+[[nodiscard]] bool is_interrupted(int error) {
+#ifdef _WIN32
+    return error == WSAEINTR;
+#else
+    return error == EINTR;
 #endif
 }
 
@@ -209,6 +261,9 @@ Result<void, SocketError> Connection::write_all(std::span<const std::byte> bytes
         const ssize_t sent = ::send(impl_->socket, chunk.data(), chunk.size(), 0);
 #endif
         if (sent <= 0) {
+            if (is_timeout_error()) {
+                return Result<void, SocketError>::err(SocketError::Timeout);
+            }
             return Result<void, SocketError>::err(SocketError::Io);
         }
         offset += static_cast<std::size_t>(sent);
@@ -221,6 +276,13 @@ void Connection::set_receive_timeout(std::chrono::milliseconds timeout) {
         return;
     }
     (void)set_receive_timeout_ms(impl_->socket, static_cast<int>(timeout.count()));
+}
+
+void Connection::set_send_timeout(std::chrono::milliseconds timeout) {
+    if (!is_open()) {
+        return;
+    }
+    (void)set_send_timeout_ms(impl_->socket, static_cast<int>(timeout.count()));
 }
 
 void Connection::close() {
@@ -313,6 +375,76 @@ Connection Listener::accept() {
     }
 
     return Connection(static_cast<int>(client));
+}
+
+Result<std::optional<Connection>, SocketError> Listener::accept(
+    std::chrono::milliseconds timeout) {
+    if (impl_->socket == kInvalidSocket) {
+        return Result<std::optional<Connection>, SocketError>::err(SocketError::Closed);
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+
+    while (true) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            return Result<std::optional<Connection>, SocketError>::ok(std::nullopt);
+        }
+
+        const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
+        timeval wait{};
+        wait.tv_sec = static_cast<long>(remaining.count() / 1000000);
+        wait.tv_usec = static_cast<long>(remaining.count() % 1000000);
+
+        fd_set read_set;
+        FD_ZERO(&read_set);
+        FD_SET(impl_->socket, &read_set);
+
+#ifdef _WIN32
+        const int ready = ::select(0, &read_set, nullptr, nullptr, &wait);
+#else
+        const int ready = ::select(impl_->socket + 1, &read_set, nullptr, nullptr, &wait);
+#endif
+        if (ready == 0) {
+            return Result<std::optional<Connection>, SocketError>::ok(std::nullopt);
+        }
+        if (ready < 0) {
+            if (is_interrupted(last_socket_error())) {
+                continue;
+            }
+            return Result<std::optional<Connection>, SocketError>::err(SocketError::Io);
+        }
+
+        // A pending connection can be aborted between select() and accept(); accept in
+        // non-blocking mode so a vanished peer cannot block the accepting thread.
+        if (!set_blocking(impl_->socket, false)) {
+            return Result<std::optional<Connection>, SocketError>::err(SocketError::Io);
+        }
+        const native_socket_t client = ::accept(impl_->socket, nullptr, nullptr);
+        const int accept_error = last_socket_error();
+        const bool blocking_restored = set_blocking(impl_->socket, true);
+
+        if (!blocking_restored) {
+            close_socket(client);
+            return Result<std::optional<Connection>, SocketError>::err(SocketError::Io);
+        }
+        if (client == kInvalidSocket) {
+            if (is_would_block(accept_error) || is_interrupted(accept_error)) {
+                continue;
+            }
+            return Result<std::optional<Connection>, SocketError>::err(SocketError::Io);
+        }
+
+        // Windows propagates the listening socket's non-blocking mode to the accepted socket, so
+        // restore blocking mode explicitly to keep the caller's read/write timeouts meaningful.
+        if (!set_blocking(client, true)) {
+            close_socket(client);
+            return Result<std::optional<Connection>, SocketError>::err(SocketError::Io);
+        }
+
+        return Result<std::optional<Connection>, SocketError>::ok(
+            std::optional<Connection>{Connection(static_cast<int>(client))});
+    }
 }
 
 } // namespace aegis::net
