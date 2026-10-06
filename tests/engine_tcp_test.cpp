@@ -16,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace aegis::engine {
 namespace {
@@ -234,6 +235,90 @@ TEST(EngineTcpTest, SilentPeerDoesNotStallOtherClients) {
 
     expect_stop_returns(engine, std::chrono::seconds{3});
     silent_peer.close();
+}
+
+TEST(EngineTcpTest, MalformedFrameReceivesFormatErrorResponse30) {
+    Engine engine;
+    ASSERT_TRUE(engine.start(make_default_config()).has_value());
+
+    net::Connection client;
+    ASSERT_TRUE(client.connect_loopback(engine.port()).has_value());
+
+    // A well-formed frame whose body carries an unknown MTI, so the codec cannot parse it.
+    const std::vector<std::byte> body{
+        std::byte{0x99},
+        std::byte{0x99},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+    };
+    ASSERT_TRUE(net::write_frame(client, body).has_value());
+
+    client.set_receive_timeout(std::chrono::seconds{2});
+    const auto frame = net::read_frame(client);
+    ASSERT_TRUE(frame.has_value());
+
+    const auto parsed = iso8583::parse(frame.value());
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed.value().mti(), Mti::AuthorizationResponse);
+    const auto code = parsed.value().get(FieldId::ResponseCode);
+    ASSERT_TRUE(code.has_value());
+    EXPECT_EQ(code.value(), "30");
+
+    engine.stop();
+}
+
+TEST(EngineTcpTest, SlowDripPeerDoesNotHoldIoThreadBeyondFrameDeadline) {
+    EngineConfig config = make_default_config();
+    config.frame_read_timeout = std::chrono::milliseconds{300};
+
+    Engine engine;
+    ASSERT_TRUE(engine.start(config).has_value());
+
+    net::Connection dripper;
+    ASSERT_TRUE(dripper.connect_loopback(engine.port()).has_value());
+
+    std::atomic<bool> keep_dripping{true};
+    std::jthread drip_thread{[&dripper, &keep_dripping] {
+        // Faster than the receive timeout, so a per-read timer never fires, but sustained far
+        // longer than the whole-frame deadline.
+        while (keep_dripping.load()) {
+            const std::array<std::byte, 1> byte{std::byte{0x30}};
+            if (!dripper.write_all(byte).has_value()) {
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        }
+    }};
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{200});
+
+    net::Connection client;
+    ASSERT_TRUE(client.connect_loopback(engine.port()).has_value());
+    const auto payload = iso8583::serialise(make_valid_auth_request());
+    ASSERT_TRUE(payload.has_value());
+    ASSERT_TRUE(net::write_frame(client, payload.value()).has_value());
+
+    client.set_receive_timeout(std::chrono::seconds{2});
+    const auto frame = net::read_frame(client);
+    EXPECT_TRUE(frame.has_value()) << "slow-drip peer starved the I/O thread";
+    if (frame.has_value()) {
+        const auto parsed = iso8583::parse(frame.value());
+        ASSERT_TRUE(parsed.has_value());
+        const auto code = parsed.value().get(FieldId::ResponseCode);
+        ASSERT_TRUE(code.has_value());
+        EXPECT_EQ(code.value(), "00");
+    }
+
+    keep_dripping.store(false);
+    drip_thread.join();
+    dripper.close();
+    expect_stop_returns(engine, std::chrono::seconds{3});
 }
 
 } // namespace

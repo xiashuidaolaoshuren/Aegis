@@ -14,8 +14,6 @@
 
 namespace aegis::ledger {
 
-enum class PostingError { Unbalanced, UnknownWallet };
-
 struct PostingLine {
     AccountId account;
     Bucket bucket;
@@ -51,7 +49,16 @@ private:
 
 [[nodiscard]] inline bool is_balanced(const PostingBatch& batch) {
     std::int64_t total = 0;
+    bool have_currency = false;
+    Currency currency = Currency::Usd;
     for (const PostingLine& line : batch) {
+        if (!have_currency) {
+            currency = line.amount.currency();
+            have_currency = true;
+        } else if (line.amount.currency() != currency) {
+            // Postings never convert currency, so a batch spanning two currencies cannot balance.
+            return false;
+        }
         const std::int64_t signed_amount =
             line.is_credit ? line.amount.minor_units() : -line.amount.minor_units();
         total += signed_amount;
@@ -78,14 +85,21 @@ inline void assert_balanced(const PostingBatch& batch) {
     }
 
     for (const PostingLine& line : batch) {
-        if (wallets.find(line.account) == wallets.end()) {
+        const auto it = wallets.find(line.account);
+        if (it == wallets.end()) {
             return Result<void, PostingError>::err(PostingError::UnknownWallet);
+        }
+        if (it->second.currency() != line.amount.currency()) {
+            return Result<void, PostingError>::err(PostingError::CurrencyMismatch);
         }
     }
 
     for (const PostingLine& line : batch) {
         const Money delta = line.is_credit ? line.amount : -line.amount;
-        wallets.at(line.account).adjust(line.bucket, delta);
+        const auto adjusted = wallets.at(line.account).adjust(line.bucket, delta);
+        if (!adjusted.has_value()) {
+            return adjusted;
+        }
     }
 
     return Result<void, PostingError>::ok();

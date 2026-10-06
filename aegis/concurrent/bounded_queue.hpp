@@ -33,7 +33,12 @@ public:
     }
 
     [[nodiscard]] std::optional<T> pop(std::stop_token stop_token) {
-        const std::stop_callback callback(stop_token, [this] { not_empty_.notify_all(); });
+        // Take the mutex before notifying so the wake-up cannot land between the predicate
+        // check and the wait, where it would be lost and the thread would sleep through stop.
+        const std::stop_callback callback(stop_token, [this] {
+            std::lock_guard lock(mutex_);
+            not_empty_.notify_all();
+        });
         std::unique_lock lock(mutex_);
         not_empty_.wait(lock, [this, &stop_token] {
             return !items_.empty() || stop_token.stop_requested();

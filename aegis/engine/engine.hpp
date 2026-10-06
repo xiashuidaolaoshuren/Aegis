@@ -59,6 +59,13 @@ namespace detail {
     return response;
 }
 
+// A frame the codec rejected carries no fields to echo, so the format-error response is bare.
+[[nodiscard]] inline iso8583::Message make_format_error_response() {
+    iso8583::Message response{iso8583::Mti::AuthorizationResponse};
+    (void)response.set(iso8583::FieldId::ResponseCode, std::string{"30"});
+    return response;
+}
+
 [[nodiscard]] inline bool write_response(net::Connection& connection,
                                          const iso8583::Message& response,
                                          metrics::AuthCounter& counter) {
@@ -236,12 +243,11 @@ private:
                 continue;
             }
 
-            // Bounds both the frame read on this thread and the response write on the worker that
-            // picks the request up, so shutdown cannot block on a silent or stalled peer.
-            conn->set_receive_timeout(config_.frame_read_timeout);
+            // The whole-frame deadline bounds this thread even if the peer trickles bytes, and
+            // the send timeout bounds the response write on the worker that picks it up.
             conn->set_send_timeout(config_.response_write_timeout);
 
-            const auto frame = net::read_frame(*conn);
+            const auto frame = net::read_frame(*conn, config_.frame_read_timeout);
             if (!frame.has_value()) {
                 conn->close();
                 continue;
@@ -249,6 +255,9 @@ private:
 
             const auto parsed = iso8583::parse(frame.value());
             if (!parsed.has_value()) {
+                // A frame we could not parse still gets a format-error response (field 39 = 30).
+                const iso8583::Message response = detail::make_format_error_response();
+                (void)detail::write_response(*conn, response, auth_counter_);
                 conn->close();
                 continue;
             }

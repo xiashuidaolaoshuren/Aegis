@@ -233,5 +233,27 @@ TEST(FramingTest, TimedAcceptReturnsBlockingConnectionThatHonoursReceiveTimeout)
     EXPECT_GE(elapsed, std::chrono::milliseconds{150});
 }
 
+TEST(FramingTest, ReadFrameWithDeadlineReturnsTimeoutWhenPeerTrickles) {
+    Listener listener;
+    ASSERT_TRUE(listener.bind_loopback(0).has_value());
+
+    Connection client;
+    ASSERT_TRUE(client.connect_loopback(listener.port()).has_value());
+    Connection server = listener.accept();
+
+    // One byte of the two-byte prefix arrives, then the peer stalls. The whole-frame deadline
+    // must expire even though the socket is not idle relative to its accept time.
+    const std::array<std::byte, 1> partial_header{std::byte{0x00}};
+    ASSERT_TRUE(server.write_all(partial_header).has_value());
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto read = read_frame(client, std::chrono::milliseconds{200});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    ASSERT_FALSE(read.has_value());
+    EXPECT_EQ(read.error(), FrameError::Timeout);
+    EXPECT_LT(elapsed, std::chrono::milliseconds{1500});
+}
+
 } // namespace
 } // namespace aegis::net
