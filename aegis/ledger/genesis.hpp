@@ -128,7 +128,8 @@ load_genesis(std::span<const GenesisRecord> records) {
         }
 
         Wallet wallet{record.id, record.kind, record.currency};
-        wallet.adjust(Bucket::Available, Money{record.currency, record.available_minor});
+        // The opening balance is denominated in the wallet's own currency by construction.
+        (void)wallet.adjust(Bucket::Available, Money{record.currency, record.available_minor});
         wallets.emplace(record.id, std::move(wallet));
     }
 

@@ -52,35 +52,24 @@ struct Ledger::Impl {
 };
 
 Ledger::Ledger(std::unordered_map<AccountId, Wallet> wallets)
-    : impl_(new Impl{std::move(wallets), {}, 1, std::chrono::hours{24}, nullptr}) {}
+    : impl_(std::make_unique<Impl>(Impl{std::move(wallets), {}, 1, std::chrono::hours{24}, nullptr})) {}
 
 Ledger::Ledger(
     std::unordered_map<AccountId, Wallet> wallets,
     std::unordered_map<HoldId, Hold> holds,
     std::uint64_t next_hold_id)
-    : impl_(new Impl{
+    : impl_(std::make_unique<Impl>(Impl{
           std::move(wallets),
           std::move(holds),
           next_hold_id,
           std::chrono::hours{24},
-          nullptr}) {}
+          nullptr})) {}
 
-Ledger::Ledger(Ledger&& other) noexcept : impl_(other.impl_) {
-    other.impl_ = nullptr;
-}
+Ledger::Ledger(Ledger&& other) noexcept = default;
 
-Ledger& Ledger::operator=(Ledger&& other) noexcept {
-    if (this != &other) {
-        delete impl_;
-        impl_ = other.impl_;
-        other.impl_ = nullptr;
-    }
-    return *this;
-}
+Ledger& Ledger::operator=(Ledger&& other) noexcept = default;
 
-Ledger::~Ledger() {
-    delete impl_;
-}
+Ledger::~Ledger() = default;
 
 Result<Hold, LedgerError> Ledger::reserve(
     AccountId cardholder,

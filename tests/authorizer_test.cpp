@@ -159,6 +159,21 @@ TEST(AuthorizerTest, IssuerDeclineReversesHoldAndReturns05) {
     EXPECT_EQ(fixture.ledger.live_hold_count(), 0U);
 }
 
+TEST(AuthorizerTest, IssuerLatencyActuallyWaits) {
+    AuthorizerFixture fixture;
+    fixture.issuer.latency = std::chrono::milliseconds{100};
+    fixture.issuer.timeout = std::chrono::seconds{10};
+    const Message request = make_valid_auth_request();
+
+    const auto started = std::chrono::steady_clock::now();
+    const Message response = fixture.authorizer.handle(request);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    EXPECT_EQ(response_code(response), "00");
+    EXPECT_EQ(fixture.issuer.calls, 1);
+    EXPECT_GE(elapsed, std::chrono::milliseconds{90});
+}
+
 TEST(AuthorizerTest, DuplicateKeyReturnsStoredResponseWithoutSecondReserveOrIssuerCall) {
     AuthorizerFixture fixture;
     const Message request = make_valid_auth_request();

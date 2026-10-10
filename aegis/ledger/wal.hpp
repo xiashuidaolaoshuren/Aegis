@@ -8,7 +8,6 @@
 #include <aegis/result.hpp>
 
 #include <algorithm>
-#include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -20,8 +19,12 @@
 #include <vector>
 
 #ifdef _WIN32
+#include <fcntl.h>
 #include <io.h>
+#include <sys/stat.h>
 #else
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -93,41 +96,44 @@ public:
             return Result<void, WalError>::ok();
         }
 
-        const std::size_t remaining = buffer_.size() - written_;
-
-        FILE* file = std::fopen(path_.string().c_str(), "ab");
-        if (file == nullptr) {
+        // Unbuffered descriptor I/O: a byte is counted as written only once the kernel has
+        // accepted it, so a failed flush leaves exactly the unconfirmed remainder pending and a
+        // later retry resumes there instead of dropping or duplicating records.
+#ifdef _WIN32
+        const int fd = _open(path_.string().c_str(),
+                             _O_WRONLY | _O_CREAT | _O_APPEND | _O_BINARY,
+                             _S_IREAD | _S_IWRITE);
+#else
+        const int fd = ::open(path_.string().c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+#endif
+        if (fd < 0) {
             return Result<void, WalError>::err(WalError::IoFailure);
         }
 
-        if (remaining > 0) {
+        while (written_ < buffer_.size()) {
             const char* data = buffer_.data() + written_;
-            const std::size_t wrote = std::fwrite(data, 1, remaining, file);
-            written_ += wrote;
-            if (wrote != remaining) {
-                std::fclose(file);
+            const std::size_t remaining = buffer_.size() - written_;
+#ifdef _WIN32
+            const int wrote = _write(fd, data, static_cast<unsigned int>(remaining));
+#else
+            const ssize_t wrote = ::write(fd, data, remaining);
+#endif
+            if (wrote <= 0) {
+                (void)close_descriptor(fd);
                 return Result<void, WalError>::err(WalError::IoFailure);
             }
-        }
-
-        if (std::fflush(file) != 0) {
-            std::fclose(file);
-            return Result<void, WalError>::err(WalError::IoFailure);
+            written_ += static_cast<std::size_t>(wrote);
         }
 
 #ifdef _WIN32
-        if (_commit(_fileno(file)) != 0) {
-            std::fclose(file);
-            return Result<void, WalError>::err(WalError::IoFailure);
-        }
+        const bool synced = _commit(fd) == 0;
 #else
-        if (fsync(fileno(file)) != 0) {
-            std::fclose(file);
-            return Result<void, WalError>::err(WalError::IoFailure);
-        }
+        const bool synced = fsync(fd) == 0;
 #endif
-
-        if (std::fclose(file) != 0) {
+        const bool closed = close_descriptor(fd);
+        if (!synced || !closed) {
+            // The bytes are in the page cache and written_ already accounts for them, so a retry
+            // appends only new records; nothing is reported durable until a flush succeeds.
             return Result<void, WalError>::err(WalError::IoFailure);
         }
 
@@ -430,6 +436,14 @@ private:
             }
         }
         return Result<AccountId, WalError>::err(WalError::CorruptRecord);
+    }
+
+    [[nodiscard]] static bool close_descriptor(int fd) {
+#ifdef _WIN32
+        return _close(fd) == 0;
+#else
+        return ::close(fd) == 0;
+#endif
     }
 
     std::filesystem::path path_;

@@ -11,9 +11,8 @@ namespace aegis::ledger {
 
 enum class WalletKind { Cardholder, Merchant, System };
 
-enum class PostingError;
-
-class PostingBatch;
+// Posting failures are values, not exceptions (design: "On the hot path, errors are values").
+enum class PostingError { Unbalanced, UnknownWallet, CurrencyMismatch };
 
 class Wallet {
 public:
@@ -52,7 +51,7 @@ public:
         return available_;
     }
 
-    void adjust(Bucket bucket, Money delta) {
+    [[nodiscard]] Result<void, PostingError> adjust(Bucket bucket, Money delta) {
         Money* target = nullptr;
         switch (bucket) {
         case Bucket::Available:
@@ -71,8 +70,11 @@ public:
         assert(target != nullptr);
 
         const auto result = *target + delta;
-        assert(result.has_value());
+        if (!result.has_value()) {
+            return Result<void, PostingError>::err(PostingError::CurrencyMismatch);
+        }
         *target = result.value();
+        return Result<void, PostingError>::ok();
     }
 
 private:

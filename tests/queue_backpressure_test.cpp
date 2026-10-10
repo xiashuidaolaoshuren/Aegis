@@ -5,6 +5,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <iostream>
 #include <optional>
 #include <stop_token>
 #include <thread>
@@ -97,6 +99,34 @@ TEST(QueueBackpressureTest, ShutdownReturnsAndLaterSubmitFails) {
 
     pool.shutdown();
     EXPECT_FALSE(pool.submit([] {}));
+}
+
+TEST(QueueBackpressureTest, StopWhilePoppingAlwaysUnblocks) {
+    for (int i = 0; i < 200; ++i) {
+        BoundedQueue<int> queue{1};
+        std::atomic<bool> finished{false};
+
+        std::jthread popper{[&queue, &finished](std::stop_token stop) {
+            (void)queue.pop(stop);
+            finished.store(true);
+        }};
+
+        // Vary when the stop lands so it can hit the window between the predicate check and the
+        // wait. A stop notification that is not serialized against the queue mutex is lost there.
+        std::this_thread::sleep_for(std::chrono::microseconds{(i * 37) % 400});
+        popper.request_stop();
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+        while (!finished.load()) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                std::cout.flush();
+                std::cerr << "pop did not return after stop; terminating to avoid deadlock"
+                          << std::endl;
+                std::_Exit(1);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+    }
 }
 
 } // namespace

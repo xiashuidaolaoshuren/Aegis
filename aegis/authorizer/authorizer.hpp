@@ -9,10 +9,12 @@
 #include <aegis/ledger/ledger.hpp>
 
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 
 namespace aegis::authorizer {
@@ -53,8 +55,11 @@ public:
             return finish(request, key, "05");
         }
 
-        const issuersim::Decision decision =
-            issuersim::await_decision(issuer_, issuersim::WaitFn{});
+        const issuersim::Decision decision = issuersim::await_decision(
+            issuer_,
+            issuersim::WaitFn{[](std::chrono::milliseconds latency) {
+                std::this_thread::sleep_for(latency);
+            }});
         if (decision == issuersim::Decision::Approved) {
             return finish(request, key, "00");
         }

@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <memory>
 #include <unordered_map>
 
 namespace aegis::ledger {
@@ -56,7 +57,7 @@ private:
         std::uint64_t next_hold_id);
 
     struct Impl;
-    Impl* impl_;
+    std::unique_ptr<Impl> impl_;
 };
 
 } // namespace aegis::ledger

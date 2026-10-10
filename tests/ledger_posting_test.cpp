@@ -21,6 +21,16 @@ TEST(WalletTest, ConstructAndReadZeroBalances) {
     EXPECT_EQ(wallet.balance(Bucket::Interchange), zero);
 }
 
+TEST(WalletTest, AdjustRejectsMismatchedCurrencyWithoutMutating) {
+    Wallet wallet{AccountId{"ch-1"}, WalletKind::Cardholder, Currency::Usd};
+
+    const auto result = wallet.adjust(Bucket::Available, Money{Currency::Eur, 100});
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), PostingError::CurrencyMismatch);
+    EXPECT_EQ(wallet.balance(Bucket::Available), (Money{Currency::Usd, 0}));
+}
+
 TEST(PostingBatchTest, HoldsLinesAndExposesContents) {
     const Money amount{Currency::Usd, 5000};
     const PostingLine line{
@@ -56,6 +66,18 @@ TEST(PostingBatchTest, UnbalancedBatchFailsValidation) {
     const PostingBatch batch{
         PostingLine{AccountId{"ch-1"}, Bucket::Available, debit, false},
         PostingLine{AccountId{"ch-1"}, Bucket::Holds, credit, true},
+    };
+
+    EXPECT_FALSE(is_balanced(batch));
+    const auto result = validate(batch);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), PostingError::Unbalanced);
+}
+
+TEST(PostingBatchTest, CrossCurrencyBatchIsNotBalanced) {
+    const PostingBatch batch{
+        PostingLine{AccountId{"ch-1"}, Bucket::Available, Money{Currency::Usd, 5000}, false},
+        PostingLine{AccountId{"ch-1"}, Bucket::Holds, Money{Currency::Eur, 5000}, true},
     };
 
     EXPECT_FALSE(is_balanced(batch));
@@ -149,6 +171,27 @@ TEST(ApplyBatchTest, RejectsUnknownWalletWithoutMutating) {
     const Money zero{Currency::Usd, 0};
     EXPECT_EQ(wallets.at(cardholder_id).balance(Bucket::Available), zero);
     EXPECT_EQ(wallets.at(cardholder_id).balance(Bucket::Holds), zero);
+}
+
+TEST(ApplyBatchTest, RejectsLineCurrencyMismatchWithWalletWithoutMutating) {
+    const AccountId eur_wallet_id{"ch-eur"};
+    std::unordered_map<AccountId, Wallet> wallets;
+    wallets.emplace(eur_wallet_id, Wallet{eur_wallet_id, WalletKind::Cardholder, Currency::Eur});
+
+    // Per-currency the batch balances (USD in, USD out), but the wallet holds EUR.
+    const Money amount{Currency::Usd, 5000};
+    const PostingBatch batch{
+        PostingLine{eur_wallet_id, Bucket::Available, amount, false},
+        PostingLine{eur_wallet_id, Bucket::Holds, amount, true},
+    };
+
+    const auto result = apply_batch(wallets, batch);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), PostingError::CurrencyMismatch);
+
+    const Money zero{Currency::Eur, 0};
+    EXPECT_EQ(wallets.at(eur_wallet_id).balance(Bucket::Available), zero);
+    EXPECT_EQ(wallets.at(eur_wallet_id).balance(Bucket::Holds), zero);
 }
 
 } // namespace

@@ -9,6 +9,8 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Debug)
 endif()
 
+option(AEGIS_BUILD_CONSOLE "Build aegis-console with Qt Widgets" OFF)
+
 add_subdirectory(aegis)
 enable_testing()
 add_subdirectory(tests)
