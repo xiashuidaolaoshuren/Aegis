@@ -2,6 +2,8 @@
 
 Spec: [2026-08-15-aegis-design.md](../specs/2026-08-15-aegis-design.md). Language: [CONTEXT.md](../../../CONTEXT.md).
 
+These plans follow the 2026-10-01 writing-plans scaffold: goal scope, verified vs provisional paths, and per-subtask consumes / produces / acceptance. **Plan mode** means how much is still undecided (`high`, `medium` with a named unknown, or `skip`), not how important the work is.
+
 | Milestone | Plan |
 |-----------|------|
 | M1 Foundation | [2026-08-15-aegis-m1-foundation-plan.md](2026-08-15-aegis-m1-foundation-plan.md) |
