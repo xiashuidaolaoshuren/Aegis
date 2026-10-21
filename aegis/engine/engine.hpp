@@ -10,6 +10,7 @@
 #include <aegis/ledger/idempotency.hpp>
 #include <aegis/ledger/ledger.hpp>
 #include <aegis/metrics/counter.hpp>
+#include <aegis/metrics/histogram.hpp>
 #include <aegis/net/framing.hpp>
 #include <aegis/net/socket.hpp>
 #include <aegis/result.hpp>
@@ -78,6 +79,17 @@ namespace detail {
     }
     counter.increment();
     return true;
+}
+
+inline void record_latency_on_success(bool written,
+                                      metrics::LatencyHistogram& histogram,
+                                      std::chrono::steady_clock::time_point start) {
+    if (!written) {
+        return;
+    }
+    const auto end = std::chrono::steady_clock::now();
+    histogram.record(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(end - start));
 }
 
 } // namespace detail
@@ -199,6 +211,14 @@ public:
         return auth_counter_;
     }
 
+    [[nodiscard]] metrics::LatencyHistogram& latency_histogram() {
+        return latency_histogram_;
+    }
+
+    [[nodiscard]] const metrics::LatencyHistogram& latency_histogram() const {
+        return latency_histogram_;
+    }
+
 private:
     // The acceptor polls with a bounded wait so it notices a stop request without relying on the
     // listening socket being closed from another thread.
@@ -256,8 +276,11 @@ private:
             const auto parsed = iso8583::parse(frame.value());
             if (!parsed.has_value()) {
                 // A frame we could not parse still gets a format-error response (field 39 = 30).
+                const auto start = std::chrono::steady_clock::now();
                 const iso8583::Message response = detail::make_format_error_response();
-                (void)detail::write_response(*conn, response, auth_counter_);
+                const bool written =
+                    detail::write_response(*conn, response, auth_counter_);
+                detail::record_latency_on_success(written, latency_histogram_, start);
                 conn->close();
                 continue;
             }
@@ -265,19 +288,22 @@ private:
             iso8583::Message request = parsed.value();
             const iso8583::Message request_for_backpressure = request;
 
-            const bool submitted = pool_->submit([this, conn, request = std::move(request)]() mutable {
+            const auto start = std::chrono::steady_clock::now();
+            const bool submitted = pool_->submit([this, conn, request = std::move(request), start]() mutable {
                 iso8583::Message response = [&]() {
                     std::lock_guard lock(ledger_mutex_);
                     return authorizer_->handle(request);
                 }();
-                (void)detail::write_response(*conn, response, auth_counter_);
+                const bool written = detail::write_response(*conn, response, auth_counter_);
+                detail::record_latency_on_success(written, latency_histogram_, start);
                 conn->close();
             });
 
             if (!submitted) {
                 const iso8583::Message response =
                     detail::make_system_response(request_for_backpressure, "96");
-                (void)detail::write_response(*conn, response, auth_counter_);
+                const bool written = detail::write_response(*conn, response, auth_counter_);
+                detail::record_latency_on_success(written, latency_histogram_, start);
                 conn->close();
             }
         }
@@ -300,6 +326,7 @@ private:
     std::optional<authorizer::Authorizer> authorizer_;
     std::mutex ledger_mutex_;
     metrics::AuthCounter auth_counter_;
+    metrics::LatencyHistogram latency_histogram_;
 };
 
 } // namespace aegis::engine

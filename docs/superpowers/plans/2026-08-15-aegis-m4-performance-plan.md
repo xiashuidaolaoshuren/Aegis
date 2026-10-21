@@ -65,7 +65,7 @@ Dependency notation: `Blocked by: T1` means start after T1 is done.
 
 ### T1 — Histogram + `aegisd --bench` + `aegis-load` rate
 
-- [ ] **Do:** Record latency/throughput; configurable load; write stage-1 numbers to `bench/`.
+- [x] **Do:** Record latency/throughput; configurable load; write stage-1 numbers to `bench/`.
 - **Consumes:** M3 `Engine`, `aegisd`, `aegis-load`, `snapshot_count`
 - **Produces:** `histogram::record` and a percentile query for p50/p99/p99.9; `aegis-load` flags for rate, duration, terminal count; `aegisd --bench` prints those percentiles and throughput; one committed stage-1 file under `bench/results/`
 - **Acceptance:** Feeding known latencies returns the expected p50/p99/p99.9. A stage-1 run writes a result file. The write-up section can be a stub until T3/T4, but the numbers are real.

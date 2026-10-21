@@ -1,0 +1,12 @@
+stage=1
+genesis=fixtures/genesis_tiny.csv
+rate_per_s=20
+duration_s=2
+terminals=2
+workers=4
+requests=40
+elapsed_ms=5015.895
+throughput_per_s=7.975
+p50_ns=159600
+p99_ns=239900
+p99_9_ns=239900
