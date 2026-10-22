@@ -77,7 +77,7 @@ Dependency notation: `Blocked by: T1` means start after T1 is done.
 
 ### T2 — Observer API (Qt-free)
 
-- [ ] **Do:** `MetricsSnapshot`, lossy ring, start/stop + three fault injects; no pointers into the engine.
+- [x] **Do:** `MetricsSnapshot`, lossy ring, start/stop + three fault injects; no pointers into the engine.
 - **Consumes:** T1 histogram percentiles; M3 running engine
 - **Produces:** `MetricsSnapshot` with throughput, approval rate, p50/p99/p99.9, queue depth, ledger health (invariant flag, live holds, WAL size, account count), worker and partition counts, uptime, running state. `push`/`drain` on a bounded ring that overwrites the oldest entry when full. Commands: start, stop, set worker/partition counts where safe, inject slow issuer, force timeouts, drop connections.
 - **Acceptance:** A copied snapshot does not alias engine memory. After more `push`es than capacity, `drain` returns only the newest entries. Command objects contain no engine pointers. Headers compile in a translation unit that does not include Qt.
