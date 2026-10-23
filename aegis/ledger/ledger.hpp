@@ -3,6 +3,7 @@
 #include <aegis/ids.hpp>
 #include <aegis/ledger/bucket.hpp>
 #include <aegis/ledger/hold.hpp>
+#include <aegis/ledger/striped.hpp>
 #include <aegis/money.hpp>
 #include <aegis/result.hpp>
 
@@ -29,7 +30,8 @@ class Ledger {
     friend class Wal;
 
 public:
-    explicit Ledger(std::unordered_map<AccountId, Wallet> wallets);
+    explicit Ledger(std::unordered_map<AccountId, Wallet> wallets,
+                    std::size_t stripe_count = StripedLocks::kDefaultStripeCount);
     Ledger(Ledger&&) noexcept;
     Ledger& operator=(Ledger&&) noexcept;
     ~Ledger();

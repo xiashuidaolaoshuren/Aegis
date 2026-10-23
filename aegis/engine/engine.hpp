@@ -9,6 +9,7 @@
 #include <aegis/ledger/genesis.hpp>
 #include <aegis/ledger/idempotency.hpp>
 #include <aegis/ledger/ledger.hpp>
+#include <aegis/ledger/striped.hpp>
 #include <aegis/metrics/counter.hpp>
 #include <aegis/metrics/histogram.hpp>
 #include <aegis/net/framing.hpp>
@@ -99,6 +100,15 @@ enum class EngineError {
     GenesisLoadFailed,
 };
 
+// Stage 1 of the ledger concurrency arc serialises every authorization behind one engine-wide
+// mutex. Stage 2 relies on the ledger's own striped locks instead, so unrelated wallets post in
+// parallel. Both stay selectable so benchmarks can compare them like for like; stage 2 is the
+// default now that bench/results/stage{1,2}.txt record the comparison.
+enum class LedgerStage {
+    GlobalMutex = 1,
+    Striped = 2,
+};
+
 struct EngineConfig {
     std::filesystem::path genesis_path;
     std::uint16_t listen_port = 0;
@@ -108,6 +118,8 @@ struct EngineConfig {
     std::size_t connection_queue_capacity = 64;
     std::chrono::milliseconds frame_read_timeout{5000};
     std::chrono::milliseconds response_write_timeout{5000};
+    LedgerStage ledger_stage{LedgerStage::Striped};
+    std::size_t ledger_stripes{ledger::StripedLocks::kDefaultStripeCount};
 };
 
 class Engine {
@@ -133,7 +145,7 @@ public:
         if (!wallets.has_value()) {
             return Result<void, EngineError>::err(EngineError::GenesisLoadFailed);
         }
-        ledger_ = std::make_unique<ledger::Ledger>(std::move(wallets.value()));
+        ledger_ = std::make_unique<ledger::Ledger>(std::move(wallets.value()), config_.ledger_stripes);
         authorizer_.emplace(*ledger_, idempotency_store_, issuer_, screen_);
 
         connection_queue_ = std::make_unique<concurrent::BoundedQueue<net::Connection>>(
@@ -291,7 +303,10 @@ private:
             const auto start = std::chrono::steady_clock::now();
             const bool submitted = pool_->submit([this, conn, request = std::move(request), start]() mutable {
                 iso8583::Message response = [&]() {
-                    std::lock_guard lock(ledger_mutex_);
+                    if (config_.ledger_stage == LedgerStage::GlobalMutex) {
+                        std::lock_guard lock(ledger_mutex_);
+                        return authorizer_->handle(request);
+                    }
                     return authorizer_->handle(request);
                 }();
                 const bool written = detail::write_response(*conn, response, auth_counter_);

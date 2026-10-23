@@ -24,8 +24,15 @@ Measure stage 1 (M3 writer), implement striped locks (stage 2) then wallet parti
 
 | Path | Create/Modify | Responsibility | Public surface | Verified/Provisional |
 |------|---------------|----------------|----------------|----------------------|
-| `aegis/ledger/ledger.hpp` | modify | Stage switch around the M2 verbs | stage 1 remains the default until measured; `reserve` / `capture` / `reverse` / `expire_due` stay | verified |
+| `aegis/ledger/ledger.hpp` | modify | Stripe count parameter on the constructor; verbs stay the M2 surface but are internally striped | stage 1 engine behaviour remains the default until measured; `reserve` / `capture` / `reverse` / `expire_due` stay | verified |
 | `aegis/ledger/striped.hpp` | create | Stage 2: hash wallet → stripe lock; ordered lock acquire | internal | provisional |
+| `aegis/ledger/idempotency.hpp` | modify | Stage 2: internal mutex; `find_*` return value copies instead of pointers into the map | `find_reserve` / `find_hold_id` / `find_capture` / `find_reverse` → `std::optional` | provisional |
+| `aegis/authorizer/authorizer.hpp` | modify | Stage 2: response cache mutex and value-copy lookup | private | provisional |
+| `aegis/issuersim/issuersim.hpp` | modify | Stage 2: `calls` becomes atomic so concurrent `handle` calls do not race | `IssuerSim::calls` | provisional |
+| `aegis/engine/engine.hpp` | modify | `EngineConfig::ledger_stage`; global mutex held only in stage 1 | `LedgerStage::{GlobalMutex, Striped}` | provisional |
+| `fixtures/genesis_stage2.csv` | create | Eight funded cardholders plus merchant and system for the shared stage-1/stage-2 bench recipe | — | provisional |
+| `bench/results/stage1.txt` | modify | Re-measured under the shared multi-cardholder recipe so stage 2 compares like for like | — | provisional |
+| `tests/ledger_lifecycle_test.cpp` | modify | Mechanical adaptation to the copy-out idempotency API (pointers → `std::optional`) | — | provisional |
 | `aegis/ledger/partition.hpp` | create | Stage 3: one thread per wallet partition | internal | provisional |
 | `aegis/ledger/twophase.hpp` | create | Capture 2PC across Cardholder/Merchant/System partitions | capture coordination used by `Ledger::capture` | provisional |
 | `aegis/metrics/histogram.hpp` | create | Latency histogram, throughput | `record`, percentile query | provisional |
@@ -91,8 +98,8 @@ Dependency notation: `Blocked by: T1` means start after T1 is done.
 
 - [ ] **Do:** Hash wallets to N locks; ordered acquire; measure; write analysis vs stage 1.
 - **Consumes:** T1 bench harness; M2 `Ledger` verbs and shadow model
-- **Produces:** stage-2 lock map (wallet hash → stripe); ordered acquire when two stripes are taken; `bench/RESULTS.md` stage-2 section
-- **Acceptance:** Unrelated wallets post in parallel under the test. Two-stripe capture or transfer always locks in a fixed order. Shadow balances match. The write-up states what changed versus stage 1.
+- **Produces:** stage-2 lock map (wallet hash → stripe); ordered acquire when two stripes are taken; thread-safe idempotency store and authorizer response cache (value copies, no pointers into shared maps); atomic issuer call counter; `EngineConfig::ledger_stage` with `aegisd --ledger-stage`; `aegis-load --pans` and `fixtures/genesis_stage2.csv` for a multi-cardholder recipe; stage-1 and stage-2 result files plus the `bench/RESULTS.md` stage-2 section
+- **Acceptance:** Unrelated wallets post in parallel under the test. Two-stripe capture or transfer always locks in a fixed order. Shadow balances match. Concurrent `handle()` calls on distinct keys return the expected codes with an exact issuer call count. With `ledger_stage = Striped` the engine approves concurrent authorizations on distinct cardholders through the same verbs. Both stages are measured under one multi-cardholder recipe so the comparison is like for like. The write-up states what changed versus stage 1.
 - **Compatibility:** `Ledger::reserve` is still one wallet. External verb signatures from M2 stay.
 - **Blocked by:** T1
 - **Plan mode:** high
@@ -135,3 +142,5 @@ T2–T4 are **`yes`**. T1 is **`partial`** (histogram math only). T5 is **`no`**
 |------|--------|------|
 | 2026-08-15 | Initial plan | — |
 | 2026-10-01 | Reshaped to the updated writing-plans scaffold. Snapshot fields copied from the spec into T2 so M5 has a contract. T1 is `medium` (histogram storage). T5 is `skip`. T2–T4 stay `high`. TDD tags unchanged | equivalent |
+| 2026-10-23 | T3 scope extended after research (user-agreed before implementation). Stage 1 is the engine's global mutex around the whole `Authorizer::handle`, which also protects the idempotency store, the response cache, and `IssuerSim::calls`; ledger-only striping therefore cannot produce a bench delta. T3 now covers that whole path plus an engine stage switch, and adds `idempotency.hpp`, `authorizer.hpp`, `issuersim.hpp`, `engine.hpp`, `fixtures/genesis_stage2.csv`, `bench/results/stage1.txt` (re-measure), and `tests/ledger_lifecycle_test.cpp` (copy-out API) to the file map. TDD tags unchanged | material |
+| 2026-10-23 | T3 implemented. Bench recipe changed from the planned 200 req/s to 1000 req/s with 32 terminals: at 200 req/s both stages plateau at ~150 req/s because `aegis-load` opens one connection per request, so the client hides any ledger difference. At the hotter rate latency separates clearly (p50 −42 %, p99 −45 %) while throughput stays at the client ceiling; `bench/RESULTS.md` states this. `EngineConfig::ledger_stage` now defaults to `Striped`, with `--ledger-stage 1` kept for reproduction | equivalent |

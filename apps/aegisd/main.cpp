@@ -31,6 +31,7 @@ struct Options {
     std::size_t io_threads{1};
     std::size_t worker_count{4};
     std::size_t inbound_capacity{1024};
+    aegis::engine::LedgerStage ledger_stage{aegis::engine::LedgerStage::GlobalMutex};
     bool bench{false};
     std::filesystem::path bench_out;
     bool bench_out_set{false};
@@ -39,14 +40,16 @@ struct Options {
     std::size_t bench_rate_per_s{0};
     std::size_t bench_duration_load_s{0};
     std::size_t bench_terminals{0};
+    std::size_t bench_pans{0};
 };
 
 void print_usage() {
     std::cout << "usage: aegisd [--port <0-65535>] [--genesis <path>]\n"
                  "              [--io-threads <n>] [--workers <n>]\n"
-                 "              [--inbound-capacity <n>]\n"
+                 "              [--inbound-capacity <n>] [--ledger-stage <1|2>]\n"
                  "              [--bench] [--bench-out <path>] [--bench-duration <seconds>]\n"
-                 "              [--bench-rate <n>] [--bench-load-duration <s>] [--bench-terminals <n>]\n";
+                 "              [--bench-rate <n>] [--bench-load-duration <s>] [--bench-terminals <n>]\n"
+                 "              [--bench-pans <n>]\n";
 }
 
 [[nodiscard]] bool parse_port(std::string_view text, std::uint16_t& out) {
@@ -138,11 +141,12 @@ void print_bench_report(const BenchReport& report) {
         return false;
     }
 
-    out << "stage=1\n"
+    out << "stage=" << static_cast<int>(options.ledger_stage) << '\n'
         << "genesis=" << options.genesis.string() << '\n'
         << "rate_per_s=" << options.bench_rate_per_s << '\n'
         << "duration_s=" << options.bench_duration_load_s << '\n'
         << "terminals=" << options.bench_terminals << '\n'
+        << "pans=" << options.bench_pans << '\n'
         << "workers=" << options.worker_count << '\n'
         << "requests=" << report.requests << '\n'
         << "elapsed_ms=" << std::fixed << std::setprecision(3) << report.elapsed_ms << '\n'
@@ -205,6 +209,18 @@ int main(int argc, char** argv) {
             }
             continue;
         }
+        if (arg == "--ledger-stage") {
+            const std::string_view value = next(arg);
+            if (value == "1") {
+                options.ledger_stage = aegis::engine::LedgerStage::GlobalMutex;
+            } else if (value == "2") {
+                options.ledger_stage = aegis::engine::LedgerStage::Striped;
+            } else {
+                std::cerr << "aegisd: invalid ledger stage (expected 1 or 2)\n";
+                return 2;
+            }
+            continue;
+        }
         if (arg == "--bench") {
             options.bench = true;
             continue;
@@ -243,6 +259,13 @@ int main(int argc, char** argv) {
             }
             continue;
         }
+        if (arg == "--bench-pans") {
+            if (!parse_size(next(arg), options.bench_pans)) {
+                std::cerr << "aegisd: invalid bench pan count\n";
+                return 2;
+            }
+            continue;
+        }
 
         std::cerr << "aegisd: unknown argument '" << arg << "'\n";
         print_usage();
@@ -263,6 +286,7 @@ int main(int argc, char** argv) {
     config.io_threads = options.io_threads;
     config.worker_count = options.worker_count;
     config.inbound_capacity = options.inbound_capacity;
+    config.ledger_stage = options.ledger_stage;
 
     aegis::engine::Engine engine;
     const auto bench_window_start = std::chrono::steady_clock::now();

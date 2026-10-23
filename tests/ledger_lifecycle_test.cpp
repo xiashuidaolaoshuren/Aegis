@@ -427,8 +427,8 @@ TEST(LifecycleTest, IdempotencyStoreStoresAndFindsReserveOutcome) {
     const Result<Hold, LedgerError> outcome = Result<Hold, LedgerError>::ok(hold);
 
     store.store_reserve(key, outcome);
-    const Result<Hold, LedgerError>* found = store.find_reserve(key);
-    ASSERT_NE(found, nullptr);
+    const auto found = store.find_reserve(key);
+    ASSERT_TRUE(found.has_value());
     ASSERT_TRUE(found->has_value());
     EXPECT_EQ(found->value().id, hold.id);
     EXPECT_EQ(found->value().amount, hold.amount);
@@ -441,8 +441,8 @@ Result<Hold, LedgerError> idempotent_reserve(
     AccountId cardholder,
     Money amount,
     MerchantId merchant) {
-    if (const Result<Hold, LedgerError>* cached = store.find_reserve(key)) {
-        return *cached;
+    if (const auto cached = store.find_reserve(key)) {
+        return cached.value();
     }
 
     const auto outcome = ledger.reserve(cardholder, amount, merchant);
@@ -456,8 +456,8 @@ Result<void, LedgerError> idempotent_capture(
     IdempotencyKey key,
     HoldId hold_id,
     Money amount) {
-    if (const Result<void, LedgerError>* cached = store.find_capture(key)) {
-        return *cached;
+    if (const auto cached = store.find_capture(key)) {
+        return cached.value();
     }
 
     const auto outcome = ledger.capture(hold_id, amount);
@@ -470,8 +470,8 @@ Result<void, LedgerError> idempotent_reverse(
     IdempotencyStore& store,
     IdempotencyKey key,
     HoldId hold_id) {
-    if (const Result<void, LedgerError>* cached = store.find_reverse(key)) {
-        return *cached;
+    if (const auto cached = store.find_reverse(key)) {
+        return cached.value();
     }
 
     const auto outcome = ledger.reverse(hold_id);
@@ -620,9 +620,9 @@ TEST(LifecycleTest, AuthKeyLocatesHoldForCapture) {
         idempotent_reserve(ledger, store, auth_key, cardholder_id, amount, merchant);
     ASSERT_TRUE(reserve_result.has_value());
 
-    const HoldId* hold_id = store.find_hold_id(auth_key);
-    ASSERT_NE(hold_id, nullptr);
-    EXPECT_EQ(*hold_id, reserve_result.value().id);
+    const auto hold_id = store.find_hold_id(auth_key);
+    ASSERT_TRUE(hold_id.has_value());
+    EXPECT_EQ(hold_id.value(), reserve_result.value().id);
 
     const IdempotencyKey capture_key{
         TerminalId{"TERM0001"},
@@ -630,7 +630,7 @@ TEST(LifecycleTest, AuthKeyLocatesHoldForCapture) {
         Mmdd{907},
     };
     const auto capture_result =
-        idempotent_capture(ledger, store, capture_key, *hold_id, amount);
+        idempotent_capture(ledger, store, capture_key, hold_id.value(), amount);
     ASSERT_TRUE(capture_result.has_value());
 
     const Money expected_payable{Currency::Usd, 4855};

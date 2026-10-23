@@ -27,12 +27,17 @@ struct Options {
     std::size_t rate_per_s{0};
     std::size_t duration_s{0};
     bool duration_set{false};
+    std::size_t pans{1};
 };
 
 void print_usage() {
     std::cout << "usage: aegis-load [--host <127.0.0.1|localhost>] [--port <0-65535>]\n"
                  "                  [--count <n>]\n"
-                 "                  [--terminals <n>] [--rate <req/s>] [--duration <seconds>]\n";
+                 "                  [--terminals <n>] [--rate <req/s>] [--duration <seconds>]\n"
+                 "                  [--pans <n>]\n"
+                 "\n"
+                 "  --pans 1 keeps the single legacy PAN. Larger values spread the load across the\n"
+                 "  cardholders of fixtures/genesis_stage2.csv (42424242xxxxxxxx).\n";
 }
 
 [[nodiscard]] bool parse_port(std::string_view text, std::uint16_t& out) {
@@ -82,14 +87,24 @@ void print_usage() {
     return std::string{buffer};
 }
 
+[[nodiscard]] std::string pan_for(std::size_t sequence, std::size_t pans) {
+    if (pans <= 1) {
+        return std::string{"4242424242424242"};
+    }
+    char buffer[17] = {};
+    std::snprintf(buffer, sizeof(buffer), "42424242%08zu", sequence % pans);
+    return std::string{buffer};
+}
+
 [[nodiscard]] aegis::iso8583::Message make_request(std::size_t stan,
-                                                     std::string_view terminal_id) {
+                                                     std::string_view terminal_id,
+                                                     std::string_view pan) {
     using aegis::iso8583::FieldId;
     using aegis::iso8583::Message;
     using aegis::iso8583::Mti;
 
     Message request{Mti::AuthorizationRequest};
-    (void)request.set(FieldId::Pan, "4242424242424242");
+    (void)request.set(FieldId::Pan, std::string{pan});
     (void)request.set(FieldId::Amount, "000000001000");
     (void)request.set(FieldId::TransmissionDateTime, "1002153045");
 
@@ -103,13 +118,16 @@ void print_usage() {
     return request;
 }
 
-[[nodiscard]] bool send_one(std::uint16_t port, std::size_t stan, std::string_view terminal_id) {
+[[nodiscard]] bool send_one(std::uint16_t port,
+                            std::size_t stan,
+                            std::string_view terminal_id,
+                            std::string_view pan) {
     aegis::net::Connection connection;
     if (!connection.connect_loopback(port).has_value()) {
         return false;
     }
 
-    const auto payload = aegis::iso8583::serialise(make_request(stan, terminal_id));
+    const auto payload = aegis::iso8583::serialise(make_request(stan, terminal_id, pan));
     if (!payload.has_value() ||
         !aegis::net::write_frame(connection, payload.value()).has_value()) {
         return false;
@@ -164,7 +182,8 @@ void paced_run(const Options& options) {
                 std::this_thread::sleep_until(scheduled);
 
                 ++attempts;
-                if (send_one(options.port, sequence + 1U, terminal_id)) {
+                if (send_one(options.port, sequence + 1U, terminal_id,
+                             pan_for(sequence, options.pans))) {
                     successes.fetch_add(1);
                 }
             }
@@ -240,6 +259,14 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        if (arg == "--pans") {
+            if (!parse_size(next(arg), options.pans)) {
+                std::cerr << "aegis-load: invalid pan count\n";
+                return 2;
+            }
+            continue;
+        }
+
         std::cerr << "aegis-load: unknown argument '" << arg << "'\n";
         print_usage();
         return 2;
@@ -270,7 +297,7 @@ int main(int argc, char** argv) {
 
     std::size_t failures = 0;
     for (std::size_t i = 0; i < options.count; ++i) {
-        if (!send_one(options.port, i + 1U, terminal_id(1))) {
+        if (!send_one(options.port, i + 1U, terminal_id(1), pan_for(i, options.pans))) {
             std::cerr << "aegis-load: connection " << (i + 1U) << " failed\n";
             ++failures;
         }
