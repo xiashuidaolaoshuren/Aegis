@@ -16,6 +16,7 @@ namespace aegis::ledger {
 
 class Wallet;
 class Wal;
+class Partition;
 
 enum class LedgerError {
     InsufficientFunds,
@@ -26,12 +27,19 @@ enum class LedgerError {
     InvalidAmount,
 };
 
+// Striped is the stage-2 ledger: one shared wallet map guarded by hashed locks. Partitioned is
+// stage 3: each wallet lives on exactly one writer thread, and the verbs route to it.
+enum class LedgerMode { Striped, Partitioned };
+
 class Ledger {
     friend class Wal;
 
 public:
     explicit Ledger(std::unordered_map<AccountId, Wallet> wallets,
                     std::size_t stripe_count = StripedLocks::kDefaultStripeCount);
+    Ledger(std::unordered_map<AccountId, Wallet> wallets,
+           LedgerMode mode,
+           std::size_t partition_count);
     Ledger(Ledger&&) noexcept;
     Ledger& operator=(Ledger&&) noexcept;
     ~Ledger();
@@ -51,6 +59,10 @@ public:
     void set_wal(Wal* wal);
     [[nodiscard]] Result<Money, LedgerError> balance(AccountId id, Bucket bucket) const;
     [[nodiscard]] std::size_t live_hold_count() const;
+
+    // Only meaningful for a partitioned ledger; a striped one reports a single partition.
+    [[nodiscard]] std::size_t partition_count() const;
+    [[nodiscard]] std::size_t partition_of(AccountId id) const;
 
 private:
     Ledger(

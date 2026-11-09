@@ -102,11 +102,13 @@ enum class EngineError {
 
 // Stage 1 of the ledger concurrency arc serialises every authorization behind one engine-wide
 // mutex. Stage 2 relies on the ledger's own striped locks instead, so unrelated wallets post in
-// parallel. Both stay selectable so benchmarks can compare them like for like; stage 2 is the
-// default now that bench/results/stage{1,2}.txt record the comparison.
+// parallel. Stage 3 gives each wallet partition its own writer thread and drops the locks. All
+// three stay selectable so benchmarks can compare them like for like; stage 2 is the default now
+// that bench/results/stage{1,2}.txt record the comparison.
 enum class LedgerStage {
     GlobalMutex = 1,
     Striped = 2,
+    Partitioned = 3,
 };
 
 struct EngineConfig {
@@ -120,6 +122,7 @@ struct EngineConfig {
     std::chrono::milliseconds response_write_timeout{5000};
     LedgerStage ledger_stage{LedgerStage::Striped};
     std::size_t ledger_stripes{ledger::StripedLocks::kDefaultStripeCount};
+    std::size_t ledger_partitions{8};
 };
 
 class Engine {
@@ -141,11 +144,17 @@ public:
 
         config_ = std::move(config);
 
-        const auto wallets = ledger::load_genesis(config_.genesis_path);
+        auto wallets = ledger::load_genesis(config_.genesis_path);
         if (!wallets.has_value()) {
             return Result<void, EngineError>::err(EngineError::GenesisLoadFailed);
         }
-        ledger_ = std::make_unique<ledger::Ledger>(std::move(wallets.value()), config_.ledger_stripes);
+        auto genesis = std::move(wallets).take();
+        if (config_.ledger_stage == LedgerStage::Partitioned) {
+            ledger_ = std::make_unique<ledger::Ledger>(
+                std::move(genesis), ledger::LedgerMode::Partitioned, config_.ledger_partitions);
+        } else {
+            ledger_ = std::make_unique<ledger::Ledger>(std::move(genesis), config_.ledger_stripes);
+        }
         authorizer_.emplace(*ledger_, idempotency_store_, issuer_, screen_);
 
         connection_queue_ = std::make_unique<concurrent::BoundedQueue<net::Connection>>(

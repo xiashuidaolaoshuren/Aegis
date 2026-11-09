@@ -32,6 +32,7 @@ struct Options {
     std::size_t worker_count{4};
     std::size_t inbound_capacity{1024};
     aegis::engine::LedgerStage ledger_stage{aegis::engine::LedgerStage::GlobalMutex};
+    std::size_t partitions{8};
     bool bench{false};
     std::filesystem::path bench_out;
     bool bench_out_set{false};
@@ -46,7 +47,7 @@ struct Options {
 void print_usage() {
     std::cout << "usage: aegisd [--port <0-65535>] [--genesis <path>]\n"
                  "              [--io-threads <n>] [--workers <n>]\n"
-                 "              [--inbound-capacity <n>] [--ledger-stage <1|2>]\n"
+                 "              [--inbound-capacity <n>] [--ledger-stage <1|2|3>] [--partitions <n>]\n"
                  "              [--bench] [--bench-out <path>] [--bench-duration <seconds>]\n"
                  "              [--bench-rate <n>] [--bench-load-duration <s>] [--bench-terminals <n>]\n"
                  "              [--bench-pans <n>]\n";
@@ -148,6 +149,7 @@ void print_bench_report(const BenchReport& report) {
         << "terminals=" << options.bench_terminals << '\n'
         << "pans=" << options.bench_pans << '\n'
         << "workers=" << options.worker_count << '\n'
+        << "partitions=" << options.partitions << '\n'
         << "requests=" << report.requests << '\n'
         << "elapsed_ms=" << std::fixed << std::setprecision(3) << report.elapsed_ms << '\n'
         << "throughput_per_s=" << std::fixed << std::setprecision(3) << report.throughput_per_s
@@ -215,8 +217,17 @@ int main(int argc, char** argv) {
                 options.ledger_stage = aegis::engine::LedgerStage::GlobalMutex;
             } else if (value == "2") {
                 options.ledger_stage = aegis::engine::LedgerStage::Striped;
+            } else if (value == "3") {
+                options.ledger_stage = aegis::engine::LedgerStage::Partitioned;
             } else {
-                std::cerr << "aegisd: invalid ledger stage (expected 1 or 2)\n";
+                std::cerr << "aegisd: invalid ledger stage (expected 1, 2, or 3)\n";
+                return 2;
+            }
+            continue;
+        }
+        if (arg == "--partitions") {
+            if (!parse_size(next(arg), options.partitions)) {
+                std::cerr << "aegisd: invalid partition count\n";
                 return 2;
             }
             continue;
@@ -287,6 +298,7 @@ int main(int argc, char** argv) {
     config.worker_count = options.worker_count;
     config.inbound_capacity = options.inbound_capacity;
     config.ledger_stage = options.ledger_stage;
+    config.ledger_partitions = options.partitions;
 
     aegis::engine::Engine engine;
     const auto bench_window_start = std::chrono::steady_clock::now();
