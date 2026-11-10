@@ -781,5 +781,63 @@ TEST(Stage3Test, EngineStageThreeHandlesConcurrentAuth) {
     server.stop();
 }
 
+// Concurrent auth (reserve) mixed with capture, the race the TSan CI job exists to see. Captures
+// are not on the ISO path, so this drives the partitioned ledger directly: each thread reserves on
+// its own cardholder and captures a disjoint slice of the seeded holds, which cross partitions.
+TEST(Stage3Test, ConcurrentAuthAndCaptureSmoke) {
+    const std::vector<GenesisRecord> records = stage3_records();
+    auto wallets = load_genesis(records);
+    ASSERT_TRUE(wallets.has_value());
+
+    Ledger ledger{std::move(wallets).take(), LedgerMode::Partitioned, 4};
+    const Money amount{Currency::Usd, 1000};
+    const MerchantId merchant{"m-1"};
+
+    constexpr std::size_t kCardholders = 4;
+    constexpr std::size_t kSeeded = 8;
+    std::vector<HoldId> seeded;
+    seeded.reserve(kCardholders * kSeeded);
+    for (std::size_t n = 0; n < kSeeded; ++n) {
+        for (std::size_t i = 0; i < kCardholders; ++i) {
+            char pan[17] = {};
+            std::snprintf(pan, sizeof(pan), "42424242%08zu", i);
+            const auto hold = ledger.reserve(account(pan), amount, merchant);
+            ASSERT_TRUE(hold.has_value());
+            seeded.push_back(hold.value().id);
+        }
+    }
+
+    constexpr std::size_t kFreshReserves = 8;
+    std::latch start{kCardholders};
+    std::atomic<std::size_t> failures{0};
+    std::vector<std::jthread> threads;
+    for (std::size_t t = 0; t < kCardholders; ++t) {
+        threads.emplace_back([&, t] {
+            start.arrive_and_wait();
+            char pan[17] = {};
+            std::snprintf(pan, sizeof(pan), "42424242%08zu", t);
+            const AccountId cardholder = account(pan);
+            for (std::size_t index = t; index < seeded.size(); index += kCardholders) {
+                if (!ledger.capture(seeded[index], amount).has_value()) {
+                    failures.fetch_add(1);
+                }
+            }
+            for (std::size_t n = 0; n < kFreshReserves; ++n) {
+                if (!ledger.reserve(cardholder, amount, merchant).has_value()) {
+                    failures.fetch_add(1);
+                }
+            }
+        });
+    }
+    threads.clear();
+
+    EXPECT_EQ(failures.load(), 0U);
+    EXPECT_EQ(ledger.live_hold_count(), kCardholders * kFreshReserves);
+    const auto merchant_payable = ledger.balance(account("m-1"), Bucket::Payable);
+    ASSERT_TRUE(merchant_payable.has_value());
+    EXPECT_EQ(merchant_payable.value().minor_units(),
+              static_cast<std::int64_t>(seeded.size()) * 971);
+}
+
 } // namespace
 } // namespace aegis::ledger

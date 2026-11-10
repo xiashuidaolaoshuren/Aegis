@@ -144,7 +144,7 @@ Dependency notation: `Blocked by: T1` means start after T1 is done.
 
 ### T5 — ThreadSanitizer CI smoke
 
-- [ ] **Do:** Linux Clang TSan job on a concurrent engine smoke (auth + capture mix).
+- [x] **Do:** Linux Clang TSan job on a concurrent engine smoke (auth + capture mix).
 
 - **Consumes:** T4 stage-3 engine
 - **Produces:** a TSan job in `.github/workflows/ci.yml`; `bench/RESULTS.md` complete for three runs
@@ -173,5 +173,6 @@ T2–T4 are `yes`. T1 is `partial` (histogram math only). T5 is `no`.
 | 2026-10-23 | T3 scope extended after research (user-agreed before implementation). Stage 1 is the engine's global mutex around the whole `Authorizer::handle`, which also protects the idempotency store, the response cache, and `IssuerSim::calls`; ledger-only striping therefore cannot produce a bench delta. T3 now covers that whole path plus an engine stage switch, and adds `idempotency.hpp`, `authorizer.hpp`, `issuersim.hpp`, `engine.hpp`, `fixtures/genesis_stage2.csv`, `bench/results/stage1.txt` (re-measure), and `tests/ledger_lifecycle_test.cpp` (copy-out API) to the file map. TDD tags unchanged | material   |
 | 2026-10-23 | T3 implemented. Bench recipe changed from the planned 200 req/s to 1000 req/s with 32 terminals: at 200 req/s both stages plateau at ~150 req/s because `aegis-load` opens one connection per request, so the client hides any ledger difference. At the hotter rate latency separates clearly (p50 −42 %, p99 −45 %) while throughput stays at the client ceiling; `bench/RESULTS.md` states this. `EngineConfig::ledger_stage` now defaults to `Striped`, with `--ledger-stage 1` kept for reproduction                                                                                                      | equivalent |
 | 2026-11-09 | T4 implemented. Stage-3 hold ids encode the owning partition (`partition << 32 \| local`) so capture/reverse route without a directory; `LedgerMode::Partitioned` + `--partitions`/`ledger_partitions` (default 8) select the stage; stage-3 WAL appends one `C` record after all prepares and before any commit (fixes the claim-then-validate wart for stage 3 only, stages 1/2 untouched); bench files gain `partitions=`. All three stages were re-measured in one session because the environment changed; stage 3 trades a small p50 increase for the best p99 and removes all shared locks. `aegis-load`/authorizer capture dispatch remains out of scope (auth-only network mix) | equivalent |
+| 2026-11-10 | T5 implemented. `linux-clang-tsan` preset and CI job instrument with `-fsanitize=thread` and run `Stage3Test.ConcurrentAuthAndCaptureSmoke` (concurrent reserve plus cross-partition capture; capture is not on the ISO path). `bench/RESULTS.md` already held the three stage write-ups, so it was left as written. The job can only go green on Linux CI; MSVC has no TSan | equivalent |
 
 
