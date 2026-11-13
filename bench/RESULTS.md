@@ -92,12 +92,13 @@ Stage 3 removes the shared critical sections stage 2 left behind:
 - A verb is a message to the owning writer: the caller submits a task and waits for the result.
   Authorization touches only the cardholder's partition. A capture is the one cross-partition
   verb.
-- Capture is a two-phase commit. The cardholder partition claims the hold and stages the debit;
-  the merchant and system partitions validate and stage their credits. Every participant must
-  prepare, in cardholder → merchant → system order with duplicate partitions merged. If any one
-  refuses, they all roll back and the hold is restored. Only when all prepare does the ledger
-  append a single capture record, and only then does each participant commit its staged lines
-  exactly once.
+- Capture is a two-phase commit. The coordinator reads the hold without claiming it, then prepares
+  the cardholder, merchant, and system roles in ascending partition order, grouping every role that
+  shares a writer. A prepared partition defers ordinary commands until that capture commits or rolls
+  back, so a reader cannot see one participant's posting without the others. If any participant
+  refuses, every enlisted writer rolls back before the error returns and the hold is restored. Only
+  when all prepare does the ledger append a single capture record, and only then does each
+  participant commit its staged lines and release the fence.
 - Hold ids encode the owning partition (`partition << 32 | local`), so capture and reverse route
   from the id alone without a directory of live holds.
 

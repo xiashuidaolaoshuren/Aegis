@@ -33,14 +33,7 @@ namespace {
 [[nodiscard]] Result<void, LedgerError> release_hold(
     std::unordered_map<AccountId, Wallet>& wallets,
     const Hold& hold) {
-    const PostingBatch batch{
-        PostingLine{hold.cardholder, Bucket::Holds, hold.amount, false},
-        PostingLine{hold.cardholder, Bucket::Available, hold.amount, true},
-    };
-    assert_balanced(batch);
-
-    const auto apply_result = apply_batch(wallets, batch);
-    if (!apply_result.has_value()) {
+    if (!apply_hold_release(wallets, hold).has_value()) {
         return Result<void, LedgerError>::err(LedgerError::UnknownWallet);
     }
     return Result<void, LedgerError>::ok();
@@ -200,8 +193,9 @@ Result<Hold, LedgerError> Ledger::reserve(
 
 Result<void, LedgerError> Ledger::capture(HoldId hold_id, Money amount) {
     if (impl_->mode == LedgerMode::Partitioned) {
-        return run_capture_2pc(impl_->partitions, impl_->partitioner, impl_->system_account,
-                               impl_->wal_sink, impl_->next_txn.fetch_add(1), hold_id, amount);
+        return run_capture_2pc(
+            impl_->partitions, impl_->partitioner, impl_->system_account, impl_->wal_sink,
+            CaptureTxnId{impl_->next_txn.fetch_add(1)}, hold_id, amount);
     }
 
     std::optional<Hold> claimed;

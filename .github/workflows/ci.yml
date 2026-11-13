@@ -180,6 +180,6 @@ jobs:
         run: cmake --build --preset linux-clang-tsan
 
       - name: Concurrent auth and capture smoke
-        run: ctest --preset linux-clang-tsan --output-on-failure -R 'Stage3Test.ConcurrentAuthAndCaptureSmoke'
+        run: ctest --preset linux-clang-tsan --output-on-failure --timeout 120 --no-tests=error -R 'Stage3Test.(EngineStageThreeHandlesConcurrentAuth|ConcurrentAuthAndCaptureSmoke|CaptureIsolation.*)'
         env:
           TSAN_OPTIONS: halt_on_error=1:abort_on_error=1

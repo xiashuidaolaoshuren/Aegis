@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <latch>
 #include <optional>
 #include <fstream>
@@ -29,11 +30,18 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
 namespace aegis::ledger {
 namespace {
+
+static_assert(!std::is_convertible_v<std::uint64_t, CaptureTxnId>);
+static_assert(!std::is_convertible_v<HoldId, CaptureTxnId>);
+static_assert(!std::is_convertible_v<CaptureTxnId, HoldId>);
+static_assert(!std::is_constructible_v<CaptureTxnId, HoldId>);
+static_assert(!std::is_constructible_v<HoldId, CaptureTxnId>);
 
 AccountId account(std::string id) {
     return AccountId{std::move(id)};
@@ -817,14 +825,22 @@ TEST(Stage3Test, ConcurrentAuthAndCaptureSmoke) {
             char pan[17] = {};
             std::snprintf(pan, sizeof(pan), "42424242%08zu", t);
             const AccountId cardholder = account(pan);
-            for (std::size_t index = t; index < seeded.size(); index += kCardholders) {
-                if (!ledger.capture(seeded[index], amount).has_value()) {
-                    failures.fetch_add(1);
+            std::size_t captured = 0;
+            std::size_t reserved = 0;
+            const std::size_t capture_count = (seeded.size() + kCardholders - 1 - t) / kCardholders;
+            while (captured < capture_count || reserved < kFreshReserves) {
+                if (captured < capture_count) {
+                    const std::size_t index = t + (captured * kCardholders);
+                    if (!ledger.capture(seeded[index], amount).has_value()) {
+                        failures.fetch_add(1);
+                    }
+                    ++captured;
                 }
-            }
-            for (std::size_t n = 0; n < kFreshReserves; ++n) {
-                if (!ledger.reserve(cardholder, amount, merchant).has_value()) {
-                    failures.fetch_add(1);
+                if (reserved < kFreshReserves) {
+                    if (!ledger.reserve(cardholder, amount, merchant).has_value()) {
+                        failures.fetch_add(1);
+                    }
+                    ++reserved;
                 }
             }
         });
@@ -837,6 +853,306 @@ TEST(Stage3Test, ConcurrentAuthAndCaptureSmoke) {
     ASSERT_TRUE(merchant_payable.has_value());
     EXPECT_EQ(merchant_payable.value().minor_units(),
               static_cast<std::int64_t>(seeded.size()) * 971);
+}
+
+Wallet funded_wallet(AccountId id, WalletKind kind, std::int64_t available) {
+    Wallet wallet{id, kind, Currency::Usd};
+    if (available != 0) {
+        EXPECT_TRUE(wallet.adjust(Bucket::Available, Money{Currency::Usd, available}).has_value());
+    }
+    return wallet;
+}
+
+// A reader must not observe a capture that has committed on one participant and not the next. The
+// holder commit is applied first, then both balances are read; the merchant read has to wait until
+// its own commit, so the pair cannot come back half-applied.
+TEST(Stage3Test, CaptureIsolationBlocksUncommittedParticipantRead) {
+    const AccountId cardholder = account("4242424200000000");
+    const AccountId merchant = account("m-1");
+    const AccountId system = account("system");
+    const Money amount{Currency::Usd, 5000};
+    const CaptureSplit split = split_capture(amount);
+
+    WalSink wal;
+    std::unordered_map<AccountId, Wallet> holder_wallets;
+    holder_wallets.emplace(cardholder, funded_wallet(cardholder, WalletKind::Cardholder, 10000));
+    std::unordered_map<AccountId, Wallet> merchant_wallets;
+    merchant_wallets.emplace(merchant, funded_wallet(merchant, WalletKind::Merchant, 0));
+    std::unordered_map<AccountId, Wallet> system_wallets;
+    system_wallets.emplace(system, funded_wallet(system, WalletKind::System, 0));
+
+    Partition holder{0, std::move(holder_wallets), wal};
+    Partition merchant_partition{1, std::move(merchant_wallets), wal};
+    Partition system_partition{2, std::move(system_wallets), wal};
+
+    const auto reserved =
+        holder.reserve(cardholder, amount, MerchantId{"m-1"}, std::chrono::system_clock::now());
+    ASSERT_TRUE(reserved.has_value());
+
+    const CaptureTxnId txn{1};
+    const auto claimed = holder.prepare_capture(txn, reserved.value().id, amount);
+    ASSERT_TRUE(claimed.has_value());
+    ASSERT_TRUE(
+        merchant_partition.prepare_credit(txn, merchant, Bucket::Payable, split.payable).has_value());
+    ASSERT_TRUE(system_partition
+                    .prepare_credit(txn, system, Bucket::Interchange, split.interchange)
+                    .has_value());
+
+    holder.commit(txn);
+
+    std::promise<void> reader_started;
+    std::future<void> reader_started_ready = reader_started.get_future();
+    std::atomic<bool> merchant_read_finished{false};
+    std::jthread reader([&] {
+        reader_started.set_value();
+        const auto holds = holder.balance(cardholder, Bucket::Holds);
+        const auto payable = merchant_partition.balance(merchant, Bucket::Payable);
+        merchant_read_finished.store(true);
+        ASSERT_TRUE(holds.has_value());
+        ASSERT_TRUE(payable.has_value());
+        EXPECT_EQ(holds.value(), (Money{Currency::Usd, 0}));
+        EXPECT_EQ(payable.value(), split.payable);
+    });
+
+    ASSERT_EQ(reader_started_ready.wait_for(std::chrono::seconds{2}), std::future_status::ready);
+    // The holder has already committed. The merchant has not, so this read must still be waiting.
+    EXPECT_FALSE(merchant_read_finished.load());
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_FALSE(merchant_read_finished.load());
+
+    merchant_partition.commit(txn);
+    system_partition.commit(txn);
+    reader.join();
+    EXPECT_TRUE(merchant_read_finished.load());
+    EXPECT_EQ(system_partition.balance(system, Bucket::Interchange).value(), split.interchange);
+    EXPECT_EQ(holder.live_hold_count(), 0U);
+}
+
+// A sweep that overlaps a capture which later fails must still expire the due hold. The merchant
+// refuses after the hold is staged, rollback restores it, and the waiting sweep then releases it.
+TEST(Stage3Test, CaptureIsolationRollbackPreservesDueExpiry) {
+    WalletPartitioner partitioner{4};
+    std::string cardholder_id;
+    std::string merchant_id;
+    bool split = false;
+    for (int i = 0; i < 64 && !split; ++i) {
+        for (int j = 0; j < 64 && !split; ++j) {
+            const std::string left = "c-" + std::to_string(i);
+            const std::string right = "m-" + std::to_string(j);
+            if (partitioner.partition_of(account(left)) != partitioner.partition_of(account(right))) {
+                cardholder_id = left;
+                merchant_id = right;
+                split = true;
+            }
+        }
+    }
+    ASSERT_TRUE(split);
+    const AccountId cardholder = account(cardholder_id);
+    const AccountId merchant = account(merchant_id);
+    const AccountId system = account("system");
+    const std::array<GenesisRecord, 3> records{{
+        GenesisRecord{WalletKind::Cardholder, cardholder, Currency::Usd, 10000},
+        GenesisRecord{WalletKind::Merchant, merchant, Currency::Eur, 0},
+        GenesisRecord{WalletKind::System, system, Currency::Usd, 0},
+    }};
+    auto ledger_wallets = load_genesis(records);
+    auto shadow_wallets = load_genesis(records);
+    ASSERT_TRUE(ledger_wallets.has_value());
+    ASSERT_TRUE(shadow_wallets.has_value());
+
+    Ledger ledger{std::move(ledger_wallets).take(), LedgerMode::Partitioned, 4};
+    ShadowLedger shadow{std::move(shadow_wallets).take()};
+    ledger.set_hold_ttl(std::chrono::seconds{0});
+    shadow.set_hold_ttl(std::chrono::seconds{0});
+
+    const Money amount{Currency::Usd, 5000};
+    const auto now = std::chrono::system_clock::now();
+    const auto reserved = ledger.reserve(cardholder, amount, MerchantId{merchant_id}, now);
+    const auto replayed = shadow.reserve(cardholder, amount, MerchantId{merchant_id}, now);
+    ASSERT_TRUE(reserved.has_value());
+    ASSERT_TRUE(replayed.has_value());
+
+    std::atomic<bool> capture_started{false};
+    std::future<Result<void, LedgerError>> captured = std::async(std::launch::async, [&] {
+        capture_started.store(true);
+        return ledger.capture(reserved.value().id, amount);
+    });
+    while (!capture_started.load()) {
+        std::this_thread::yield();
+    }
+
+    std::future<std::size_t> swept = std::async(std::launch::async, [&] {
+        return ledger.expire_due(now);
+    });
+
+    ASSERT_EQ(captured.wait_for(std::chrono::seconds{2}), std::future_status::ready);
+    EXPECT_EQ(captured.get().error(), LedgerError::CurrencyMismatch);
+    EXPECT_EQ(shadow.capture(replayed.value().id, amount).error(), LedgerError::CurrencyMismatch);
+    EXPECT_EQ(shadow.expire_due(now), 1U);
+
+    ASSERT_EQ(swept.wait_for(std::chrono::seconds{2}), std::future_status::ready);
+    EXPECT_EQ(swept.get(), 1U);
+    EXPECT_EQ(ledger.live_hold_count(), shadow.live_hold_count());
+    EXPECT_EQ(ledger.balance(cardholder, Bucket::Available).value(),
+              shadow.balance(cardholder, Bucket::Available).value());
+    EXPECT_EQ(ledger.balance(cardholder, Bucket::Holds).value(),
+              shadow.balance(cardholder, Bucket::Holds).value());
+    EXPECT_EQ(ledger.balance(merchant, Bucket::Payable).value(), (Money{Currency::Eur, 0}));
+    EXPECT_EQ(ledger.expire_due(now), 0U);
+}
+
+// Two captures whose holder-first orders oppose each other must both finish, and a wallet on a
+// partition neither capture touches must still be able to reserve while they run.
+TEST(Stage3Test, CaptureIsolationSharedParticipantsMakeProgress) {
+    constexpr std::size_t kPartitions = 8;
+    const WalletPartitioner partitioner{kPartitions};
+    const std::size_t system_part = partitioner.partition_of(account("system"));
+
+    std::string left_card;
+    std::string right_card;
+    std::string left_merchant;
+    std::string right_merchant;
+    std::string idle_card;
+    bool found = false;
+    for (int i = 0; i < 80 && !found; ++i) {
+        const std::string card = "c-" + std::to_string(i);
+        const std::size_t card_part = partitioner.partition_of(account(card));
+        if (card_part == system_part) {
+            continue;
+        }
+        for (int j = 0; j < 80 && !found; ++j) {
+            const std::string other = "d-" + std::to_string(j);
+            const std::size_t other_part = partitioner.partition_of(account(other));
+            if (other_part == card_part || other_part == system_part) {
+                continue;
+            }
+            for (int k = 0; k < 80 && !found; ++k) {
+                const std::string idle = "i-" + std::to_string(k);
+                const std::size_t idle_part = partitioner.partition_of(account(idle));
+                if (idle_part == card_part || idle_part == other_part || idle_part == system_part) {
+                    continue;
+                }
+                left_card = card;
+                right_card = other;
+                // Each merchant sits on the other cardholder's partition, so holder-first order
+                // for the two captures is the reverse of each other.
+                left_merchant = "m-" + other;
+                right_merchant = "m-" + card;
+                // Merchants are different ids; place them by searching until the partitions match.
+                found = false;
+            }
+        }
+    }
+
+    auto place_merchant = [&](std::size_t want, std::string& out) {
+        for (int n = 0; n < 120; ++n) {
+            const std::string id = "m-" + std::to_string(n);
+            if (partitioner.partition_of(account(id)) == want) {
+                out = id;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    found = false;
+    for (int i = 0; i < 80 && !found; ++i) {
+        const std::string card = "c-" + std::to_string(i);
+        const std::size_t card_part = partitioner.partition_of(account(card));
+        if (card_part == system_part) {
+            continue;
+        }
+        for (int j = 0; j < 80 && !found; ++j) {
+            const std::string other = "d-" + std::to_string(j);
+            const std::size_t other_part = partitioner.partition_of(account(other));
+            if (other_part == card_part || other_part == system_part || other_part < card_part) {
+                continue;
+            }
+            std::string merchant_on_other;
+            std::string merchant_on_card;
+            if (!place_merchant(other_part, merchant_on_other) ||
+                !place_merchant(card_part, merchant_on_card)) {
+                continue;
+            }
+            for (int k = 0; k < 80 && !found; ++k) {
+                const std::string idle = "i-" + std::to_string(k);
+                const std::size_t idle_part = partitioner.partition_of(account(idle));
+                if (idle_part == card_part || idle_part == other_part || idle_part == system_part) {
+                    continue;
+                }
+                left_card = card;
+                right_card = other;
+                left_merchant = merchant_on_other;
+                right_merchant = merchant_on_card;
+                idle_card = idle;
+                found = true;
+            }
+        }
+    }
+    ASSERT_TRUE(found);
+
+    const AccountId left = account(left_card);
+    const AccountId right = account(right_card);
+    const AccountId left_payee = account(left_merchant);
+    const AccountId right_payee = account(right_merchant);
+    const AccountId idle = account(idle_card);
+    ASSERT_LT(partitioner.partition_of(left), partitioner.partition_of(left_payee));
+    ASSERT_GT(partitioner.partition_of(right), partitioner.partition_of(right_payee));
+    ASSERT_EQ(partitioner.partition_of(left), partitioner.partition_of(right_payee));
+    ASSERT_EQ(partitioner.partition_of(right), partitioner.partition_of(left_payee));
+
+    const std::array<GenesisRecord, 6> records{{
+        GenesisRecord{WalletKind::Cardholder, left, Currency::Usd, 20000},
+        GenesisRecord{WalletKind::Cardholder, right, Currency::Usd, 20000},
+        GenesisRecord{WalletKind::Cardholder, idle, Currency::Usd, 20000},
+        GenesisRecord{WalletKind::Merchant, left_payee, Currency::Usd, 0},
+        GenesisRecord{WalletKind::Merchant, right_payee, Currency::Usd, 0},
+        GenesisRecord{WalletKind::System, account("system"), Currency::Usd, 0},
+    }};
+    auto wallets = load_genesis(records);
+    ASSERT_TRUE(wallets.has_value());
+    Ledger ledger{std::move(wallets).take(), LedgerMode::Partitioned, kPartitions};
+
+    const Money amount{Currency::Usd, 5000};
+    const auto left_hold = ledger.reserve(left, amount, MerchantId{left_merchant});
+    const auto right_hold = ledger.reserve(right, amount, MerchantId{right_merchant});
+    ASSERT_TRUE(left_hold.has_value());
+    ASSERT_TRUE(right_hold.has_value());
+
+    std::latch start{3};
+    std::atomic<int> failures{0};
+    std::jthread first{[&] {
+        start.arrive_and_wait();
+        if (!ledger.capture(left_hold.value().id, amount).has_value()) {
+            failures.fetch_add(1);
+        }
+    }};
+    std::jthread second{[&] {
+        start.arrive_and_wait();
+        if (!ledger.capture(right_hold.value().id, amount).has_value()) {
+            failures.fetch_add(1);
+        }
+    }};
+    std::jthread bystander{[&] {
+        start.arrive_and_wait();
+        if (!ledger.reserve(idle, amount, MerchantId{left_merchant}).has_value()) {
+            failures.fetch_add(1);
+        }
+    }};
+    first.join();
+    second.join();
+    bystander.join();
+
+    EXPECT_EQ(failures.load(), 0);
+    EXPECT_EQ(ledger.balance(left_payee, Bucket::Payable).value(), (Money{Currency::Usd, 4855}));
+    EXPECT_EQ(ledger.balance(right_payee, Bucket::Payable).value(), (Money{Currency::Usd, 4855}));
+    EXPECT_EQ(ledger.balance(account("system"), Bucket::Interchange).value(),
+              (Money{Currency::Usd, 290}));
+    EXPECT_EQ(ledger.balance(idle, Bucket::Holds).value(), amount);
+
+    // Both captures have released their fences, so a later reserve on a participant still posts.
+    ASSERT_TRUE(ledger.reserve(left, amount, MerchantId{left_merchant}).has_value());
+    EXPECT_EQ(ledger.live_hold_count(), 2U);
 }
 
 } // namespace

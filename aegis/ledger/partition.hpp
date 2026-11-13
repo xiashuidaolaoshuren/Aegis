@@ -74,6 +74,12 @@ inline constexpr std::uint64_t kHoldLocalMask = (std::uint64_t{1} << kHoldPartit
     return id.value() & kHoldLocalMask;
 }
 
+// A capture's identity is not a hold id. The tag stops a partition index, a hold, or a raw counter
+// from being passed where the two-phase transaction belongs.
+struct CaptureTxnIdTag {};
+
+using CaptureTxnId = Tagged<std::uint64_t, CaptureTxnIdTag>;
+
 // What one partition is holding for a capture that has prepared but not yet committed. The claimed
 // hold is only set on the partition that owns it; the lines are the postings this partition will
 // apply if the capture commits.
@@ -155,38 +161,55 @@ public:
         }).get();
     }
 
-    // Releases every hold that is already due and returns how many it released. A hold touches only
-    // its own cardholder, and that cardholder lives on this partition, so the sweep never leaves it.
-    // Lifts the hold out of the live set and remembers it against the transaction. A second capture
-    // of the same hold now finds nothing, which is what stops it paying twice.
-    [[nodiscard]] Result<Hold, LedgerError> prepare_capture(std::uint64_t txn,
-                                                             HoldId hold_id,
-                                                             Money amount) {
-        return submit([this, txn, hold_id, amount] {
+    // A copy of a live hold, without claiming it. Capture uses this to learn the merchant before
+    // any partition is fenced; the prepare that follows still revalidates the hold.
+    [[nodiscard]] Result<Hold, LedgerError> find_hold(HoldId hold_id) {
+        return submit([this, hold_id] {
                    const auto it = holds_.find(hold_id);
                    if (it == holds_.end()) {
                        return Result<Hold, LedgerError>::err(LedgerError::UnknownHold);
                    }
-                   if (it->second.amount != amount) {
-                       return Result<Hold, LedgerError>::err(LedgerError::AmountMismatch);
-                   }
-                   PreparedCapture& staged = staged_[txn];
-                   staged.claimed = it->second;
-                   staged.lines.push_back(
-                       PostingLine{it->second.cardholder, Bucket::Holds, amount, false});
-                   holds_.erase(it);
-                   return Result<Hold, LedgerError>::ok(staged.claimed.value());
+                   return Result<Hold, LedgerError>::ok(it->second);
                })
             .get();
     }
 
+    // Releases every hold that is already due and returns how many it released. A hold touches only
+    // its own cardholder, and that cardholder lives on this partition, so the sweep never leaves it.
+    // Lifts the hold out of the live set and remembers it against the transaction. A second capture
+    // of the same hold now finds nothing, which is what stops it paying twice. A successful prepare
+    // owns the writer until commit or rollback, so a balance read cannot see this debit alone.
+    [[nodiscard]] Result<Hold, LedgerError> prepare_capture(CaptureTxnId txn,
+                                                             HoldId hold_id,
+                                                             Money amount) {
+        const auto claimed = submit_control(txn, [this, txn, hold_id, amount] {
+                                 const auto it = holds_.find(hold_id);
+                                 if (it == holds_.end()) {
+                                     return Result<Hold, LedgerError>::err(LedgerError::UnknownHold);
+                                 }
+                                 if (it->second.amount != amount) {
+                                     return Result<Hold, LedgerError>::err(
+                                         LedgerError::AmountMismatch);
+                                 }
+                                 PreparedCapture& staged = staged_[txn];
+                                 staged.claimed = it->second;
+                                 staged.lines.push_back(
+                                     PostingLine{it->second.cardholder, Bucket::Holds, amount, false});
+                                 holds_.erase(it);
+                                 note_owner(txn);
+                                 return Result<Hold, LedgerError>::ok(staged.claimed.value());
+                             })
+                                 .get();
+        return claimed;
+    }
+
     // Remembers a credit to apply when the transaction commits. The line is not posted yet, so a
     // later refusal can still discard it.
-    [[nodiscard]] Result<void, LedgerError> prepare_credit(std::uint64_t txn,
+    [[nodiscard]] Result<void, LedgerError> prepare_credit(CaptureTxnId txn,
                                                             AccountId account,
                                                             Bucket bucket,
                                                             Money amount) {
-        return submit([this, txn, account = std::move(account), bucket, amount] {
+        return submit_control(txn, [this, txn, account = std::move(account), bucket, amount] {
                    const auto wallet = wallets_.find(account);
                    if (wallet == wallets_.end()) {
                        return Result<void, LedgerError>::err(LedgerError::UnknownWallet);
@@ -195,7 +218,12 @@ public:
                        return Result<void, LedgerError>::err(LedgerError::CurrencyMismatch);
                    }
                    PreparedCapture& staged = staged_[txn];
+                   if (staged.claimed.has_value() &&
+                       staged.claimed.value().amount.currency() != amount.currency()) {
+                       return Result<void, LedgerError>::err(LedgerError::CurrencyMismatch);
+                   }
                    staged.lines.push_back(PostingLine{account, bucket, amount, true});
+                   note_owner(txn);
                    return Result<void, LedgerError>::ok();
                })
             .get();
@@ -210,12 +238,7 @@ public:
                        return Result<void, LedgerError>::err(LedgerError::UnknownHold);
                    }
                    const Hold hold = it->second;
-                   const PostingBatch batch{
-                       PostingLine{hold.cardholder, Bucket::Holds, hold.amount, false},
-                       PostingLine{hold.cardholder, Bucket::Available, hold.amount, true},
-                   };
-                   assert_balanced(batch);
-                   if (!apply_batch(wallets_, batch).has_value()) {
+                   if (!apply_hold_release(wallets_, hold).has_value()) {
                        return Result<void, LedgerError>::err(LedgerError::UnknownWallet);
                    }
                    holds_.erase(it);
@@ -225,32 +248,32 @@ public:
             .get();
     }
 
-    void commit(std::uint64_t txn) {
-        submit([this, txn] {
+    void commit(CaptureTxnId txn) {
+        submit_control(txn, [this, txn] {
             const auto staged = staged_.find(txn);
-            if (staged == staged_.end()) {
-                return;
+            if (staged != staged_.end()) {
+                for (const PostingLine& line : staged->second.lines) {
+                    const Money delta = line.is_credit ? line.amount : -line.amount;
+                    const auto applied = wallets_.at(line.account).adjust(line.bucket, delta);
+                    assert(applied.has_value());
+                }
+                staged_.erase(staged);
             }
-            for (const PostingLine& line : staged->second.lines) {
-                const Money delta = line.is_credit ? line.amount : -line.amount;
-                const auto applied = wallets_.at(line.account).adjust(line.bucket, delta);
-                assert(applied.has_value());
-            }
-            staged_.erase(staged);
+            release_owner(txn);
         }).get();
     }
 
-    void rollback(std::uint64_t txn) {
-        submit([this, txn] {
+    void rollback(CaptureTxnId txn) {
+        submit_control(txn, [this, txn] {
             const auto staged = staged_.find(txn);
-            if (staged == staged_.end()) {
-                return;
+            if (staged != staged_.end()) {
+                if (staged->second.claimed.has_value()) {
+                    const Hold& hold = staged->second.claimed.value();
+                    holds_.emplace(hold.id, hold);
+                }
+                staged_.erase(staged);
             }
-            if (staged->second.claimed.has_value()) {
-                const Hold& hold = staged->second.claimed.value();
-                holds_.emplace(hold.id, hold);
-            }
-            staged_.erase(staged);
+            release_owner(txn);
         }).get();
     }
 
@@ -264,12 +287,7 @@ public:
                            continue;
                        }
                        const Hold hold = it->second;
-                       const PostingBatch batch{
-                           PostingLine{hold.cardholder, Bucket::Holds, hold.amount, false},
-                           PostingLine{hold.cardholder, Bucket::Available, hold.amount, true},
-                       };
-                       assert_balanced(batch);
-                       if (!apply_batch(wallets_, batch).has_value()) {
+                       if (!apply_hold_release(wallets_, hold).has_value()) {
                            ++it;
                            continue;
                        }
@@ -289,13 +307,39 @@ public:
     // so the caller observes the partition's state exactly as the writer left it.
     template <class F>
     [[nodiscard]] auto submit(F&& work) -> std::future<std::invoke_result_t<F>> {
+        return enqueue(false, std::nullopt, std::forward<F>(work));
+    }
+
+    // A prepare, commit, or rollback of the transaction that owns this writer. It runs while ordinary
+    // commands wait, and it is the only kind of message that can release that wait.
+    template <class F>
+    [[nodiscard]] auto submit_control(CaptureTxnId txn, F&& work)
+        -> std::future<std::invoke_result_t<F>> {
+        return enqueue(true, txn, std::forward<F>(work));
+    }
+
+private:
+    using Task = std::function<void()>;
+
+    struct Envelope {
+        Task task;
+        bool control{false};
+        std::optional<CaptureTxnId> txn;
+    };
+
+    template <class F>
+    [[nodiscard]] auto enqueue(bool control, std::optional<CaptureTxnId> txn, F&& work)
+        -> std::future<std::invoke_result_t<F>> {
         using Result = std::invoke_result_t<F>;
         // A writer that waits on its own queue can never drain it.
         assert(std::this_thread::get_id() != writer_.get_id());
 
         auto promise = std::make_shared<std::promise<Result>>();
         std::future<Result> ready = promise->get_future();
-        post([promise, work = std::forward<F>(work)]() mutable {
+        Envelope envelope;
+        envelope.control = control;
+        envelope.txn = txn;
+        envelope.task = [promise, work = std::forward<F>(work)]() mutable {
             try {
                 if constexpr (std::is_void_v<Result>) {
                     work();
@@ -306,12 +350,26 @@ public:
             } catch (...) {
                 promise->set_exception(std::current_exception());
             }
-        });
+        };
+        {
+            std::lock_guard lock(inbox_mutex_);
+            inbox_.push_back(std::move(envelope));
+        }
+        inbox_cv_.notify_one();
         return ready;
     }
 
-private:
-    using Task = std::function<void()>;
+    void note_owner(CaptureTxnId txn) {
+        if (!owner_.has_value()) {
+            owner_ = txn;
+        }
+    }
+
+    void release_owner(CaptureTxnId txn) {
+        if (owner_.has_value() && owner_.value() == txn) {
+            owner_.reset();
+        }
+    }
 
     [[nodiscard]] Result<Hold, LedgerError> reserve_local(const AccountId& cardholder,
                                                            Money amount,
@@ -361,29 +419,74 @@ private:
         return Result<Money, LedgerError>::ok(it->second.balance(bucket));
     }
 
-    void post(Task task) {
-        {
-            std::lock_guard lock(inbox_mutex_);
-            inbox_.push_back(std::move(task));
+    [[nodiscard]] bool defers(const Envelope& envelope) const {
+        if (!owner_.has_value()) {
+            return false;
         }
-        inbox_cv_.notify_one();
+        return !(envelope.control && envelope.txn.has_value() &&
+                 envelope.txn.value() == owner_.value());
+    }
+
+    void promote_deferred() {
+        if (owner_.has_value() || deferred_.empty()) {
+            return;
+        }
+        std::lock_guard lock(inbox_mutex_);
+        for (auto it = deferred_.rbegin(); it != deferred_.rend(); ++it) {
+            inbox_.push_front(std::move(*it));
+        }
+        deferred_.clear();
+        inbox_cv_.notify_all();
     }
 
     void loop(std::stop_token stop) {
         while (true) {
-            Task task;
+            Envelope envelope;
             {
                 std::unique_lock lock(inbox_mutex_);
                 inbox_cv_.wait(lock, [this, &stop] {
-                    return !inbox_.empty() || closed_ || stop.stop_requested();
+                    return !inbox_.empty() || !deferred_.empty() || closed_ ||
+                           stop.stop_requested();
                 });
                 if (inbox_.empty()) {
-                    return;
+                    if (!deferred_.empty() && !owner_.has_value()) {
+                        lock.unlock();
+                        promote_deferred();
+                        continue;
+                    }
+                    if (closed_ || stop.stop_requested()) {
+                        return;
+                    }
+                    continue;
                 }
-                task = std::move(inbox_.front());
+                envelope = std::move(inbox_.front());
                 inbox_.pop_front();
+                // Anything queued behind a capture stays queued, including work that arrived before
+                // the writer noticed the fence. Only the owning transaction's control runs now.
+                if (owner_.has_value()) {
+                    std::deque<Envelope> waiting;
+                    while (!inbox_.empty()) {
+                        Envelope next = std::move(inbox_.front());
+                        inbox_.pop_front();
+                        const bool owns = next.control && next.txn.has_value() &&
+                                          next.txn.value() == owner_.value();
+                        if (owns) {
+                            waiting.push_back(std::move(next));
+                        } else {
+                            deferred_.push_back(std::move(next));
+                        }
+                    }
+                    for (auto it = waiting.rbegin(); it != waiting.rend(); ++it) {
+                        inbox_.push_front(std::move(*it));
+                    }
+                }
             }
-            task();
+            if (defers(envelope)) {
+                deferred_.push_back(std::move(envelope));
+                continue;
+            }
+            envelope.task();
+            promote_deferred();
         }
     }
 
@@ -402,14 +505,17 @@ private:
     std::size_t index_;
     std::unordered_map<AccountId, Wallet> wallets_;
     std::unordered_map<HoldId, Hold> holds_;
-    std::unordered_map<std::uint64_t, PreparedCapture> staged_;
+    std::unordered_map<CaptureTxnId, PreparedCapture> staged_;
     std::uint64_t next_local_hold_{1};
     std::chrono::seconds hold_ttl_{std::chrono::hours{24}};
     WalSink* wal_;
 
+    std::optional<CaptureTxnId> owner_;
+    std::deque<Envelope> deferred_;
+
     std::mutex inbox_mutex_;
     std::condition_variable inbox_cv_;
-    std::deque<Task> inbox_;
+    std::deque<Envelope> inbox_;
     bool closed_{false};
     std::jthread writer_;
 };
