@@ -1,0 +1,14 @@
+stage=1
+genesis=fixtures/genesis_stage2.csv
+rate_per_s=1000
+duration_s=4
+terminals=32
+pans=8
+workers=8
+partitions=8
+requests=3900
+elapsed_ms=5009.113
+throughput_per_s=778.581
+p50_ns=1709300
+p99_ns=4770600
+p99_9_ns=8093000

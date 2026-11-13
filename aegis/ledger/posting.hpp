@@ -2,6 +2,7 @@
 
 #include <aegis/ids.hpp>
 #include <aegis/ledger/bucket.hpp>
+#include <aegis/ledger/hold.hpp>
 #include <aegis/ledger/wallet.hpp>
 #include <aegis/money.hpp>
 #include <aegis/result.hpp>
@@ -103,6 +104,19 @@ inline void assert_balanced(const PostingBatch& batch) {
     }
 
     return Result<void, PostingError>::ok();
+}
+
+// Reversal and expiry both return a live hold to Available. Callers still own hold removal and the
+// WAL record, so this only posts the balanced pair.
+[[nodiscard]] inline Result<void, PostingError> apply_hold_release(
+    std::unordered_map<AccountId, Wallet>& wallets,
+    const Hold& hold) {
+    const PostingBatch batch{
+        PostingLine{hold.cardholder, Bucket::Holds, hold.amount, false},
+        PostingLine{hold.cardholder, Bucket::Available, hold.amount, true},
+    };
+    assert_balanced(batch);
+    return apply_batch(wallets, batch);
 }
 
 } // namespace aegis::ledger

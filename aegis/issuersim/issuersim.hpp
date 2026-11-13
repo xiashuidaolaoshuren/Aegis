@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 
@@ -13,16 +14,18 @@ enum class Decision {
 
 using WaitFn = std::function<void(std::chrono::milliseconds)>;
 
+// A fake network with no balances. Stage 2 calls this from several workers at once, so the call
+// counter is atomic; the configuration fields stay read-only for the duration of a run.
 class IssuerSim {
 public:
     std::chrono::milliseconds latency{std::chrono::milliseconds{0}};
     std::chrono::milliseconds timeout{std::chrono::seconds{30}};
     bool inject_decline{false};
-    int calls{0};
+    std::atomic<int> calls{0};
 };
 
 [[nodiscard]] inline Decision await_decision(IssuerSim& sim, WaitFn wait) {
-    ++sim.calls;
+    sim.calls.fetch_add(1, std::memory_order_relaxed);
     if (sim.latency >= sim.timeout) {
         return Decision::Timeout;
     }

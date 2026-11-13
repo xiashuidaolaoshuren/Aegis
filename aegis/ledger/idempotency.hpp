@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <mutex>
+#include <optional>
 #include <unordered_map>
 
 namespace aegis::ledger {
@@ -35,60 +37,75 @@ struct IdempotencyKeyHash {
     }
 };
 
+// Stage 2 keeps this store's mutex internal: several workers call it at once, and handing out
+// pointers into these maps would let another thread's insert invalidate a caller's answer. Every
+// lookup therefore returns a copy.
 class IdempotencyStore {
 public:
-    [[nodiscard]] const Result<Hold, LedgerError>* find_reserve(IdempotencyKey key) const {
+    [[nodiscard]] std::optional<Result<Hold, LedgerError>> find_reserve(
+        IdempotencyKey key) const {
+        std::lock_guard lock(mutex_);
         const auto it = reserve_outcomes_.find(key);
         if (it == reserve_outcomes_.end()) {
-            return nullptr;
+            return std::nullopt;
         }
-        return &it->second;
+        return it->second;
     }
 
     void store_reserve(IdempotencyKey key, Result<Hold, LedgerError> outcome) {
+        std::lock_guard lock(mutex_);
         if (outcome.has_value()) {
             auth_key_to_hold_id_.emplace(key, outcome.value().id);
         }
         reserve_outcomes_.emplace(std::move(key), std::move(outcome));
     }
 
-    [[nodiscard]] const HoldId* find_hold_id(IdempotencyKey original_auth_key) const {
+    [[nodiscard]] std::optional<HoldId> find_hold_id(IdempotencyKey original_auth_key) const {
+        std::lock_guard lock(mutex_);
         const auto it = auth_key_to_hold_id_.find(original_auth_key);
         if (it == auth_key_to_hold_id_.end()) {
-            return nullptr;
+            return std::nullopt;
         }
-        return &it->second;
+        return it->second;
     }
 
-    [[nodiscard]] const Result<void, LedgerError>* find_capture(IdempotencyKey key) const {
+    [[nodiscard]] std::optional<Result<void, LedgerError>> find_capture(
+        IdempotencyKey key) const {
+        std::lock_guard lock(mutex_);
         const auto it = capture_outcomes_.find(key);
         if (it == capture_outcomes_.end()) {
-            return nullptr;
+            return std::nullopt;
         }
-        return &it->second;
+        return it->second;
     }
 
     void store_capture(IdempotencyKey key, Result<void, LedgerError> outcome) {
+        std::lock_guard lock(mutex_);
         capture_outcomes_.emplace(std::move(key), std::move(outcome));
     }
 
-    [[nodiscard]] const Result<void, LedgerError>* find_reverse(IdempotencyKey key) const {
+    [[nodiscard]] std::optional<Result<void, LedgerError>> find_reverse(
+        IdempotencyKey key) const {
+        std::lock_guard lock(mutex_);
         const auto it = reverse_outcomes_.find(key);
         if (it == reverse_outcomes_.end()) {
-            return nullptr;
+            return std::nullopt;
         }
-        return &it->second;
+        return it->second;
     }
 
     void store_reverse(IdempotencyKey key, Result<void, LedgerError> outcome) {
+        std::lock_guard lock(mutex_);
         reverse_outcomes_.emplace(std::move(key), std::move(outcome));
     }
 
     [[nodiscard]] std::size_t size() const {
+        std::lock_guard lock(mutex_);
         return reserve_outcomes_.size() + capture_outcomes_.size() + reverse_outcomes_.size();
     }
 
 private:
+    mutable std::mutex mutex_;
     std::unordered_map<IdempotencyKey, Result<Hold, LedgerError>, IdempotencyKeyHash>
         reserve_outcomes_;
     std::unordered_map<IdempotencyKey, Result<void, LedgerError>, IdempotencyKeyHash>

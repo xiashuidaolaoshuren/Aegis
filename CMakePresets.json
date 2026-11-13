@@ -54,6 +54,16 @@
             }
         },
         {
+            "name": "linux-clang-tsan",
+            "displayName": "Linux Clang + TSan (vcpkg)",
+            "inherits": "linux-clang",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer -g",
+                "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread"
+            }
+        },
+        {
             "name": "windows-msvc-console",
             "displayName": "Windows MSVC + Qt console (vcpkg)",
             "inherits": "windows-msvc",
@@ -83,6 +93,10 @@
         {
             "name": "linux-clang-asan",
             "configurePreset": "linux-clang-asan"
+        },
+        {
+            "name": "linux-clang-tsan",
+            "configurePreset": "linux-clang-tsan"
         }
     ],
     "testPresets": [
@@ -104,6 +118,13 @@
         {
             "name": "linux-clang-asan",
             "configurePreset": "linux-clang-asan",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "linux-clang-tsan",
+            "configurePreset": "linux-clang-tsan",
             "output": {
                 "outputOnFailure": true
             }

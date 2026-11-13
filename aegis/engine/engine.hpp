@@ -9,7 +9,9 @@
 #include <aegis/ledger/genesis.hpp>
 #include <aegis/ledger/idempotency.hpp>
 #include <aegis/ledger/ledger.hpp>
+#include <aegis/ledger/striped.hpp>
 #include <aegis/metrics/counter.hpp>
+#include <aegis/metrics/histogram.hpp>
 #include <aegis/net/framing.hpp>
 #include <aegis/net/socket.hpp>
 #include <aegis/result.hpp>
@@ -80,11 +82,33 @@ namespace detail {
     return true;
 }
 
+inline void record_latency_on_success(bool written,
+                                      metrics::LatencyHistogram& histogram,
+                                      std::chrono::steady_clock::time_point start) {
+    if (!written) {
+        return;
+    }
+    const auto end = std::chrono::steady_clock::now();
+    histogram.record(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(end - start));
+}
+
 } // namespace detail
 
 enum class EngineError {
     BindFailed,
     GenesisLoadFailed,
+};
+
+// Stage 1 of the ledger concurrency arc serialises every authorization behind one engine-wide
+// mutex. Stage 2 relies on the ledger's own striped locks instead, so unrelated wallets post in
+// parallel. Stage 3 gives each wallet partition its own writer thread and drops the locks. All
+// three stay selectable so benchmarks can compare them like for like; stage 2 is the default now
+// that bench/results/stage{1,2}.txt record the comparison.
+enum class LedgerStage {
+    GlobalMutex = 1,
+    Striped = 2,
+    Partitioned = 3,
 };
 
 struct EngineConfig {
@@ -96,6 +120,9 @@ struct EngineConfig {
     std::size_t connection_queue_capacity = 64;
     std::chrono::milliseconds frame_read_timeout{5000};
     std::chrono::milliseconds response_write_timeout{5000};
+    LedgerStage ledger_stage{LedgerStage::Striped};
+    std::size_t ledger_stripes{ledger::StripedLocks::kDefaultStripeCount};
+    std::size_t ledger_partitions{8};
 };
 
 class Engine {
@@ -117,11 +144,17 @@ public:
 
         config_ = std::move(config);
 
-        const auto wallets = ledger::load_genesis(config_.genesis_path);
+        auto wallets = ledger::load_genesis(config_.genesis_path);
         if (!wallets.has_value()) {
             return Result<void, EngineError>::err(EngineError::GenesisLoadFailed);
         }
-        ledger_ = std::make_unique<ledger::Ledger>(std::move(wallets.value()));
+        auto genesis = std::move(wallets).take();
+        if (config_.ledger_stage == LedgerStage::Partitioned) {
+            ledger_ = std::make_unique<ledger::Ledger>(
+                std::move(genesis), ledger::LedgerMode::Partitioned, config_.ledger_partitions);
+        } else {
+            ledger_ = std::make_unique<ledger::Ledger>(std::move(genesis), config_.ledger_stripes);
+        }
         authorizer_.emplace(*ledger_, idempotency_store_, issuer_, screen_);
 
         connection_queue_ = std::make_unique<concurrent::BoundedQueue<net::Connection>>(
@@ -199,6 +232,14 @@ public:
         return auth_counter_;
     }
 
+    [[nodiscard]] metrics::LatencyHistogram& latency_histogram() {
+        return latency_histogram_;
+    }
+
+    [[nodiscard]] const metrics::LatencyHistogram& latency_histogram() const {
+        return latency_histogram_;
+    }
+
 private:
     // The acceptor polls with a bounded wait so it notices a stop request without relying on the
     // listening socket being closed from another thread.
@@ -256,8 +297,11 @@ private:
             const auto parsed = iso8583::parse(frame.value());
             if (!parsed.has_value()) {
                 // A frame we could not parse still gets a format-error response (field 39 = 30).
+                const auto start = std::chrono::steady_clock::now();
                 const iso8583::Message response = detail::make_format_error_response();
-                (void)detail::write_response(*conn, response, auth_counter_);
+                const bool written =
+                    detail::write_response(*conn, response, auth_counter_);
+                detail::record_latency_on_success(written, latency_histogram_, start);
                 conn->close();
                 continue;
             }
@@ -265,19 +309,25 @@ private:
             iso8583::Message request = parsed.value();
             const iso8583::Message request_for_backpressure = request;
 
-            const bool submitted = pool_->submit([this, conn, request = std::move(request)]() mutable {
+            const auto start = std::chrono::steady_clock::now();
+            const bool submitted = pool_->submit([this, conn, request = std::move(request), start]() mutable {
                 iso8583::Message response = [&]() {
-                    std::lock_guard lock(ledger_mutex_);
+                    if (config_.ledger_stage == LedgerStage::GlobalMutex) {
+                        std::lock_guard lock(ledger_mutex_);
+                        return authorizer_->handle(request);
+                    }
                     return authorizer_->handle(request);
                 }();
-                (void)detail::write_response(*conn, response, auth_counter_);
+                const bool written = detail::write_response(*conn, response, auth_counter_);
+                detail::record_latency_on_success(written, latency_histogram_, start);
                 conn->close();
             });
 
             if (!submitted) {
                 const iso8583::Message response =
                     detail::make_system_response(request_for_backpressure, "96");
-                (void)detail::write_response(*conn, response, auth_counter_);
+                const bool written = detail::write_response(*conn, response, auth_counter_);
+                detail::record_latency_on_success(written, latency_histogram_, start);
                 conn->close();
             }
         }
@@ -300,6 +350,7 @@ private:
     std::optional<authorizer::Authorizer> authorizer_;
     std::mutex ledger_mutex_;
     metrics::AuthCounter auth_counter_;
+    metrics::LatencyHistogram latency_histogram_;
 };
 
 } // namespace aegis::engine

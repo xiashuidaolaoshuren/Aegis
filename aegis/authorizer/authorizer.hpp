@@ -11,6 +11,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -34,7 +35,7 @@ public:
 
         const ledger::IdempotencyKey key = make_key(request);
         if (const auto cached = find_cached_response(key)) {
-            return make_response(request, *cached);
+            return make_response(request, cached.value());
         }
 
         if (!screen(request, ledger_, screen_).has_value()) {
@@ -73,21 +74,29 @@ private:
     ledger::IdempotencyStore& store_;
     issuersim::IssuerSim& issuer_;
     ScreenConfig& screen_;
+    mutable std::mutex cache_mutex_;
     std::unordered_map<ledger::IdempotencyKey, std::string, ledger::IdempotencyKeyHash>
         response_cache_;
 
-    [[nodiscard]] const std::string* find_cached_response(const ledger::IdempotencyKey& key) const {
+    [[nodiscard]] std::optional<std::string> find_cached_response(
+        const ledger::IdempotencyKey& key) const {
+        // Stage 2 hands out a copy: workers call handle() at the same time, and a pointer into
+        // this map would dangle as soon as another worker inserted.
+        std::lock_guard lock(cache_mutex_);
         const auto it = response_cache_.find(key);
         if (it == response_cache_.end()) {
-            return nullptr;
+            return std::nullopt;
         }
-        return &it->second;
+        return it->second;
     }
 
     [[nodiscard]] iso8583::Message finish(const iso8583::Message& request,
                                           const ledger::IdempotencyKey& key,
                                           std::string_view response_code) {
-        response_cache_[key] = std::string{response_code};
+        {
+            std::lock_guard lock(cache_mutex_);
+            response_cache_[key] = std::string{response_code};
+        }
         return make_response(request, response_code);
     }
 
